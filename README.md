@@ -24,6 +24,8 @@ npm run build
 ```
 
 - Windows: `src-tauri/target/release/bundle/msi/*.msi` and `nsis/*.exe`
+ - `npx tauri build --no-bundle` to build without the installer
+
 - macOS: `src-tauri/target/release/bundle/dmg/*.dmg` and `macos/OpenUGC.app`
 
 You can't build the macOS version from Windows. Build it on a Mac.
@@ -34,7 +36,7 @@ You can't build the macOS version from Windows. Build it on a Mac.
 - `src-tauri/src/main.rs` – Tauri commands the UI calls
 - `src-tauri/src/appstore.rs` – App Store search and gem scoring (Apple's iTunes Search API)
 - `src-tauri/src/prepare.rs` – downloads icons/screenshots, writes overviews with the Claude CLI
-- App data (downloaded assets, `state.json`) is stored in the OS app-data folder under `com.openugc.app`
+- App data (downloaded assets, `state.json`) is stored in the OS app-data folder under `com.openugc.OpenUGC`
 
 ## Tests
 

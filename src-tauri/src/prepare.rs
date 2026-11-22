@@ -89,19 +89,27 @@ fn listing(app: &AppInfo) -> String {
 /// Writes an overview with the chosen local CLI, using the user's own login (no API key).
 pub fn generate_overview(app: &AppInfo, writer: Writer) -> Result<String> {
     let text = match writer {
-        Writer::Claude => run_claude(&listing(app))?,
-        Writer::Codex => run_codex(&format!("{OVERVIEW_INSTRUCTIONS}\n\n---\n\n{}", listing(app)))?,
+        Writer::Claude => run_claude(OVERVIEW_INSTRUCTIONS, &listing(app))?,
+        Writer::Codex => run_codex(OVERVIEW_INSTRUCTIONS, &listing(app))?,
     };
     // Models sometimes wrap the line in quotes despite instructions.
     Ok(text.trim().trim_matches(|c| c == '"' || c == '“' || c == '”').trim().to_string())
 }
 
-fn run_claude(prompt: &str) -> Result<String> {
+/// Runs headless Claude with `instructions` as the system prompt and `prompt` as the message.
+pub(crate) fn run_claude(instructions: &str, prompt: &str) -> Result<String> {
     // Multi-line arguments can't be passed safely to a Windows .cmd shim, so the
-    // instructions go in a file.
-    let instructions = std::env::temp_dir().join("openugc-overview-instructions.txt");
-    std::fs::write(&instructions, OVERVIEW_INSTRUCTIONS)?;
-    let instructions = instructions.to_string_lossy();
+    // instructions go in a file, one per call so parallel calls don't clash.
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = std::env::temp_dir().join(format!("openugc-instructions-{}-{n}.txt", std::process::id()));
+    std::fs::write(&file, instructions)?;
+    let result = run_claude_with_file(&file.to_string_lossy(), prompt);
+    let _ = std::fs::remove_file(&file);
+    result
+}
+
+fn run_claude_with_file(instructions: &str, prompt: &str) -> Result<String> {
     let args = [
         "-p",
         "--output-format", "json",
@@ -127,7 +135,9 @@ fn run_claude(prompt: &str) -> Result<String> {
     Ok(parsed.result)
 }
 
-fn run_codex(prompt: &str) -> Result<String> {
+/// Runs Codex non-interactively. It has no separate system prompt, so the instructions lead the message.
+pub(crate) fn run_codex(instructions: &str, prompt: &str) -> Result<String> {
+    let prompt = format!("{instructions}\n\n---\n\n{prompt}");
     // Run from an empty temp dir so Codex has no project files to look at.
     let cwd = std::env::temp_dir().join("openugc-codex");
     std::fs::create_dir_all(&cwd)?;
@@ -140,7 +150,7 @@ fn run_codex(prompt: &str) -> Result<String> {
         "-c", "model_reasoning_effort=low",
         "-",
     ];
-    let out = run_cli("codex", &args, prompt, Some(&cwd))?;
+    let out = run_cli("codex", &args, &prompt, Some(&cwd))?;
     let text = String::from_utf8_lossy(&out).trim().to_string();
     if text.is_empty() {
         bail!("codex returned no text. Run `codex login` in a terminal if you haven't.");

@@ -733,7 +733,7 @@ mod tests {
     fn render_sample() {
         let appdata = std::env::var("APPDATA").expect("APPDATA");
         let state: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(Path::new(&appdata).join("com.openugc.app/state.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(Path::new(&appdata).join("com.openugc.OpenUGC/state.json")).unwrap()).unwrap();
         let apps: Vec<PreparedApp> = serde_json::from_value(state["prepared"].clone()).unwrap();
         let out = std::env::temp_dir().join("openugc-slides-test");
         let t = std::time::Instant::now();

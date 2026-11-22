@@ -2,11 +2,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod appstore;
+mod buffer;
+mod caption;
 mod prepare;
+mod r2;
+mod settings;
 mod slides;
 
 use appstore::{AppInfo, GemFilter};
+use caption::Caption;
 use prepare::{PreparedApp, Writer};
+use serde::Serialize;
 use slides::{RenderedSlideshow, SlideOptions};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -58,6 +64,89 @@ async fn render_slides(app: AppHandle, apps: Vec<PreparedApp>, options: SlideOpt
 }
 
 #[tauri::command]
+async fn generate_caption(niche: String, apps: Vec<PreparedApp>, writer: Writer) -> CmdResult<Caption> {
+    blocking(move || caption::generate_caption(&niche, &apps, writer)).await
+}
+
+#[tauri::command]
+fn get_settings(app: AppHandle) -> CmdResult<settings::SettingsView> {
+    Ok(settings::view(&data_dir(&app)?))
+}
+
+/// For each key: leave it out to keep the stored one, send "" to remove it.
+#[tauri::command]
+fn save_settings(
+    app: AppHandle,
+    settings: settings::Settings,
+    buffer_key: Option<String>,
+    r2_secret: Option<String>,
+) -> CmdResult<settings::SettingsView> {
+    let dir = data_dir(&app)?;
+    settings::save(&dir, &settings, buffer_key, r2_secret).map_err(|e| format!("{e:#}"))?;
+    Ok(settings::view(&dir))
+}
+
+/// Settings plus keys, for moving to another computer (the UI turns it into a paste-able code).
+#[tauri::command]
+fn export_settings(app: AppHandle) -> CmdResult<settings::Export> {
+    Ok(settings::export(&data_dir(&app)?))
+}
+
+#[tauri::command]
+async fn check_r2(app: AppHandle) -> CmdResult<String> {
+    let s = settings::load(&data_dir(&app)?);
+    blocking(move || r2::R2::from_settings(&s)?.check()).await
+}
+
+#[tauri::command]
+async fn buffer_channels() -> CmdResult<Vec<buffer::Channel>> {
+    blocking(|| buffer::channels(&settings::buffer_key()?)).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Scheduled {
+    post: buffer::BufferPost,
+    image_urls: Vec<String>,
+}
+
+/// Uploads the slides to R2, then creates a Buffer reminder post for `due_at` (ISO 8601, UTC).
+#[tauri::command]
+async fn schedule_post(
+    app: AppHandle,
+    slides: Vec<PathBuf>,
+    channel_id: String,
+    caption: Caption,
+    title: String,
+    due_at: String,
+) -> CmdResult<Scheduled> {
+    let s = settings::load(&data_dir(&app)?);
+    blocking(move || {
+        let key = settings::buffer_key()?;
+        let store = r2::R2::from_settings(&s)?;
+        let mut image_urls = Vec::new();
+        for path in &slides {
+            let folder = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("slides");
+            let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("slide.jpg");
+            let safe = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '-' }).collect::<String>();
+            image_urls.push(store.upload_file(&format!("openugc/{}/{}", safe(folder), safe(file)), path)?);
+        }
+        let text = caption::post_text(&caption);
+        let post = buffer::create_post(
+            &key,
+            &buffer::NewPost { channel_id: &channel_id, text: &text, title: &title, image_urls: &image_urls, due_at: &due_at },
+        )?;
+        Ok(Scheduled { post, image_urls })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn refresh_post(id: String) -> CmdResult<buffer::BufferPost> {
+    blocking(move || buffer::get_post(&settings::buffer_key()?, &id)).await
+}
+
+#[tauri::command]
 fn load_state(app: AppHandle) -> CmdResult<serde_json::Value> {
     let path = data_dir(&app)?.join("state.json");
     match std::fs::read(&path) {
@@ -84,6 +173,14 @@ fn main() {
             prepare_app,
             rewrite_overview,
             render_slides,
+            generate_caption,
+            get_settings,
+            save_settings,
+            export_settings,
+            check_r2,
+            buffer_channels,
+            schedule_post,
+            refresh_post,
             load_state,
             save_state
         ])

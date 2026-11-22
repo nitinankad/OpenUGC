@@ -14,14 +14,39 @@
   <div class="shell">
     <nav class="rail" aria-label="Sections">
       <div class="brand">OpenUGC</div>
-      <button class="nav-item is-active" data-view="find">Find apps</button>
-      <button class="nav-item" data-view="prepare">Prepared <span class="nav-count" id="nav-prepared"></span></button>
-      <button class="nav-item" data-view="slides">Slides</button>
+      <button class="nav-item is-active" data-view="board">Posts</button>
+      <div class="rail-post" id="rail-post" hidden>
+        <span class="rail-account" id="rail-account"></span>
+        <input class="rail-name" id="post-name" type="text" spellcheck="false" aria-label="Post name" />
+      </div>
+      <button class="nav-item nav-step" data-view="find">Find apps</button>
+      <button class="nav-item nav-step" data-view="prepare">Prepared <span class="nav-count" id="nav-prepared"></span></button>
+      <button class="nav-item nav-step" data-view="slides">Slides</button>
+      <button class="nav-item nav-bottom" data-view="settings">Settings</button>
     </nav>
 
     <main class="stage">
+      <!-- Posts board -->
+      <section class="view" id="view-board">
+        <header class="find-head board-head">
+          <div>
+            <h1>Posts</h1>
+            <p class="lede">Each TikTok account has its own posts. Open a post to pick its apps, make its slides and schedule it.</p>
+          </div>
+          <div class="inline">
+            <button type="button" class="btn btn-quiet" id="refresh-posts" hidden>Refresh status</button>
+            <button type="button" class="btn btn-primary btn-sm" id="add-account">Add account</button>
+          </div>
+        </header>
+        <div class="board" id="board"></div>
+        <div class="empty" id="board-empty" hidden>
+          <p class="empty-title">Add your first account.</p>
+          <p>Enter a TikTok username, then make posts for it. Each post is one slideshow.</p>
+        </div>
+      </section>
+
       <!-- Find -->
-      <section class="view" id="view-find">
+      <section class="view" id="view-find" hidden>
         <header class="find-head">
           <h1>Find hidden gems</h1>
           <form class="search" id="search-form" autocomplete="off">
@@ -55,7 +80,7 @@
         </header>
         <div class="prepared" id="prepared"></div>
         <div class="empty" id="prepare-empty">
-          <p class="empty-title">Nothing prepared yet.</p>
+          <p class="empty-title">No apps in this post yet.</p>
           <p>Add up to six apps in Find apps, then press Prepare in the preview.</p>
         </div>
       </section>
@@ -99,7 +124,80 @@
               <p class="empty-title">No slides yet.</p>
               <p>Pick your text and colours, then press Make slides. You'll get 2160 × 2700 JPEGs: the hook, one slide per app, and the last slide.</p>
             </div>
+
+            <section class="post" id="post" hidden>
+              <div class="post-head">
+                <h2>Caption</h2>
+                <button type="button" class="btn btn-quiet" id="write-caption">Write caption</button>
+                <button type="button" class="btn btn-quiet" id="copy-caption">Copy</button>
+              </div>
+              <label class="field">TikTok title <input type="text" id="post-title" maxlength="90" /></label>
+              <label class="field">Caption <textarea class="overview" id="post-caption" rows="2"></textarea></label>
+              <label class="field">Hashtags, separated by spaces <input type="text" id="post-tags" spellcheck="false" placeholder="appstore iphoneapps" /></label>
+              <div class="charcount" id="tag-count"></div>
+
+              <div class="post-head post-head-gap"><h2>Schedule on Buffer</h2></div>
+              <p class="hint">Buffer sends a reminder to your phone at this time. You post it from TikTok yourself, so you can add a sound first. Nothing is posted automatically.</p>
+              <div class="scheduled-box" id="post-scheduled" hidden>
+                <p id="post-scheduled-text"></p>
+                <button type="button" class="btn btn-quiet" id="refresh-post">Refresh status</button>
+              </div>
+              <div id="schedule-form">
+                <div class="field">
+                  <label for="post-channel">Buffer account</label>
+                  <div class="inline">
+                    <select id="post-channel"></select>
+                    <button type="button" class="btn btn-quiet" id="load-channels">Reload</button>
+                  </div>
+                  <span class="field-note" id="channel-hint"></span>
+                </div>
+                <label class="field">Reminder time <input type="datetime-local" id="post-when" /></label>
+                <button type="button" class="btn btn-primary" id="schedule-btn">Schedule reminder</button>
+              </div>
+              <p class="hint" id="schedule-needs" hidden>Add your Buffer API key and R2 details in <button type="button" class="link" data-goto="settings">Settings</button> first.</p>
+            </section>
           </div>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section class="view" id="view-settings" hidden>
+        <header class="find-head">
+          <h1>Settings</h1>
+          <p class="lede">Keys are stored in this computer's keychain, not in a file. They're never shown again after you save them.</p>
+        </header>
+        <div class="settings-page">
+          <form class="settings" id="settings-form" autocomplete="off">
+            <fieldset>
+              <legend>Buffer</legend>
+              <label class="field">API key <input type="password" id="set-buffer-key" spellcheck="false" /></label>
+              <p class="hint">In Buffer, open Settings, then API, and create a key. Connect your TikTok accounts in Buffer too.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Slide hosting on Cloudflare R2</legend>
+              <p class="hint">Buffer only takes images from public links, so slides are uploaded to your R2 bucket first. In the bucket's settings, turn on public access (the r2.dev link or a custom domain). Then create an R2 API token with Object Read &amp; Write on that bucket.</p>
+              <label class="field">Account ID <input type="text" data-s="r2AccountId" spellcheck="false" /></label>
+              <label class="field">Access key ID <input type="text" data-s="r2AccessKeyId" spellcheck="false" /></label>
+              <label class="field">Secret access key <input type="password" id="set-r2-secret" spellcheck="false" /></label>
+              <label class="field">Bucket name <input type="text" data-s="r2Bucket" spellcheck="false" /></label>
+              <label class="field">Public URL <input type="url" data-s="r2PublicUrl" spellcheck="false" placeholder="https://pub-….r2.dev" /></label>
+            </fieldset>
+            <div class="inline">
+              <button type="submit" class="btn btn-primary" id="save-settings">Save settings</button>
+              <button type="button" class="btn btn-quiet" id="check-buffer">Check Buffer</button>
+              <button type="button" class="btn btn-quiet" id="check-r2">Check R2</button>
+            </div>
+          </form>
+
+          <section class="transfer">
+            <h2>Use on another computer</h2>
+            <p class="hint">Copy a settings code here and paste it into OpenUGC on your other computer. It brings over your keys, R2 details and accounts (usernames, Buffer links and the app each promotes). Posts stay on this computer. Because it contains your keys, only send it to yourself somewhere private.</p>
+            <button type="button" class="btn btn-quiet" id="copy-settings">Copy settings code</button>
+            <label class="field transfer-paste">Paste a settings code from your other computer
+              <textarea class="overview" id="import-code" rows="3" spellcheck="false"></textarea>
+            </label>
+            <button type="button" class="btn btn-quiet" id="import-settings">Use this code</button>
+          </section>
         </div>
       </section>
     </main>
@@ -129,7 +227,7 @@
           </div>
         </div>
         <form id="mine-form" autocomplete="off">
-          <p class="mine-hint">Goes into every slideshow alongside the gems.</p>
+          <p class="mine-hint">Goes into every post for this account, alongside the gems.</p>
           <div class="mine-search">
             <input id="mine-query" type="text" spellcheck="false" placeholder="App Store link or name" aria-label="Your app's App Store link or name" />
             <button type="submit" class="btn btn-quiet" id="mine-find">Find</button>
