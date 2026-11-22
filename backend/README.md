@@ -79,6 +79,7 @@ Every request needs `Authorization: Bearer <API_TOKEN>`.
 | GET | `/profiles` | accounts with latest and previous follower numbers |
 | PUT | `/profiles` | `{ "usernames": [...] }`: the full account list; missing ones stop being scraped |
 | GET | `/profiles/:username/history` | every follower snapshot |
+| GET | `/profiles/:username/totals` | per scrape: every post's numbers added up, plus followers |
 | GET | `/videos?username=` | posts with latest and previous numbers and their OpenUGC link |
 | GET | `/videos/:id/history` | every snapshot of one post |
 | POST | `/scrape` | start a scrape now (409 if one is running) |

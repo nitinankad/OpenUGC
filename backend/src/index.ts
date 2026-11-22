@@ -1,29 +1,45 @@
 // OpenUGC metrics: scrapes your TikTok profiles twice a day and serves the numbers to the app.
 
 import { cleanUsername } from "./items.ts";
+import { log } from "./log.ts";
 import { catchUp, checkRuns, startScrape, type Env } from "./scrape.ts";
 
 const START_CRON = "0 */12 * * *";
 
 export default {
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (event.cron === START_CRON) {
-      // Save anything still pending first, so a slow earlier run doesn't block the new one forever.
-      await checkRuns(env);
-      // Skip if a catch-up scrape already ran in the last 2 hours.
-      await catchUp(env, 2 * 3_600_000);
-    } else {
-      await checkRuns(env);
-      await catchUp(env);
+    try {
+      if (event.cron === START_CRON) {
+        log.info("cron.start", { cron: event.cron });
+        // Save anything still pending first, so a slow earlier run doesn't block the new one forever.
+        await checkRuns(env);
+        // Skip if a catch-up scrape already ran in the last 2 hours.
+        log.info("cron.done", { cron: event.cron, ...(await catchUp(env, 2 * 3_600_000)) });
+      } else {
+        await checkRuns(env);
+        const r = await catchUp(env);
+        if (r.started) log.info("cron.caught_up", { cron: event.cron, ...r });
+      }
+    } catch (e) {
+      log.error("cron.failed", e, { cron: event.cron });
+      throw e; // also marks the invocation as failed in Cloudflare's dashboard
     }
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const path = new URL(req.url).pathname;
     try {
-      if (!(await authorized(req, env))) return json({ error: "Missing or wrong API token" }, 401);
+      if (!(await authorized(req, env))) {
+        log.warn("http.unauthorized", { method: req.method, path, workerHasToken: !!env.API_TOKEN });
+        return json({ error: "Missing or wrong API token" }, 401);
+      }
       return await route(req, env, ctx);
     } catch (e) {
-      if (e instanceof HttpError) return json({ error: e.message }, e.status);
+      if (e instanceof HttpError) {
+        log.warn("http.error", { method: req.method, path, status: e.status, error: e.message });
+        return json({ error: e.message }, e.status);
+      }
+      log.error("http.failed", e, { method: req.method, path });
       return json({ error: e instanceof Error ? e.message : String(e) }, 500);
     }
   },
@@ -65,6 +81,7 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   if (m === "GET" && at("profiles")) return json(await profiles(env));
   if (m === "PUT" && at("profiles")) return json(await setProfiles(env, await body(req)));
   if (m === "GET" && at("profiles", "*", "history")) return json(await profileHistory(env, cleanUsername(parts[1])));
+  if (m === "GET" && at("profiles", "*", "totals")) return json(await profileTotals(env, cleanUsername(parts[1])));
   if (m === "GET" && at("videos")) return json(await videos(env, url.searchParams.get("username")));
   if (m === "GET" && at("videos", "*", "history")) return json(await videoHistory(env, parts[1]));
   if (m === "POST" && at("scrape")) {
@@ -131,6 +148,36 @@ async function profileHistory(env: Env, username: string) {
     .bind(username)
     .all<any>();
   return results.map((r) => pick(r, "", SNAP_PROFILE));
+}
+
+/**
+ * One point per scrape: every post's numbers added up, plus followers from the same scrape.
+ * Posts that weren't returned by a scrape (deleted, or past MAX_POSTS_PER_PROFILE) aren't in its sum.
+ */
+async function profileTotals(env: Env, username: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT s.run_id, MIN(s.scraped_at) AS scraped_at, COUNT(*) AS posts,
+            SUM(s.views) AS views, SUM(s.likes) AS likes, SUM(s.comments) AS comments,
+            SUM(s.shares) AS shares, SUM(s.saves) AS saves, SUM(s.reposts) AS reposts,
+            (SELECT p.followers FROM profile_snapshots p WHERE p.username = ?1 AND p.run_id = s.run_id) AS followers
+     FROM video_snapshots s JOIN videos v ON v.id = s.video_id
+     WHERE v.username = ?1
+     GROUP BY s.run_id
+     ORDER BY scraped_at`,
+  )
+    .bind(username)
+    .all<any>();
+  return results.map((r) => ({
+    scrapedAt: r.scraped_at,
+    posts: r.posts,
+    views: r.views,
+    likes: r.likes,
+    comments: r.comments,
+    shares: r.shares,
+    saves: r.saves,
+    reposts: r.reposts,
+    followers: r.followers,
+  }));
 }
 
 async function videos(env: Env, username: string | null) {

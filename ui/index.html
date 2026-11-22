@@ -23,7 +23,8 @@
       <button class="nav-item nav-step" data-view="find">Find apps</button>
       <button class="nav-item nav-step" data-view="prepare">Prepared <span class="nav-count" id="nav-prepared"></span></button>
       <button class="nav-item nav-step" data-view="slides">Slides</button>
-      <button class="nav-item nav-bottom" data-view="settings">Settings</button>
+      <button class="nav-item nav-bottom" data-view="analytics">Analytics</button>
+      <button class="nav-item" data-view="settings">Settings</button>
       <button class="nav-item theme-toggle" id="theme-toggle" type="button">
         <svg class="theme-icon theme-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
         <svg class="theme-icon theme-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
@@ -205,6 +206,39 @@
         </div>
       </section>
 
+      <!-- Analytics -->
+      <section class="view" id="view-analytics" hidden>
+        <header class="find-head an-head">
+          <div>
+            <h1>Analytics</h1>
+            <p class="lede" id="an-status">Views, likes, comments, shares and saves for every TikTok post, scraped every 12 hours.</p>
+          </div>
+          <div class="inline an-actions" id="an-actions" hidden>
+            <label class="an-account">Account <select id="an-account"></select></label>
+            <button type="button" class="btn btn-quiet" id="an-refresh">Refresh</button>
+            <button type="button" class="btn btn-primary btn-sm" id="an-scrape">Scrape now</button>
+          </div>
+        </header>
+        <div class="an-body" id="an-body">
+          <div class="empty" id="an-setup" hidden>
+            <p class="empty-title">Connect your analytics Worker.</p>
+            <p>Deploy the Worker in the backend folder, then enter its URL and API token in <button type="button" class="link" data-goto="settings">Settings</button>.</p>
+          </div>
+          <p class="an-note" id="an-note" hidden></p>
+          <section class="an-section" id="an-totals" hidden>
+            <h2 class="an-h2">All posts <span class="an-sub" id="an-totals-sub"></span></h2>
+            <div class="charts" id="an-charts"></div>
+          </section>
+          <section class="an-section" id="an-posts" hidden>
+            <h2 class="an-h2">Posts <span class="an-sub" id="an-posts-sub"></span></h2>
+            <div class="an-table" role="table" aria-label="Posts">
+              <div class="an-row an-row-head" role="row" id="an-thead"></div>
+              <div id="an-rows"></div>
+            </div>
+          </section>
+        </div>
+      </section>
+
       <!-- Settings -->
       <section class="view" id="view-settings" hidden>
         <header class="find-head">
@@ -227,16 +261,23 @@
               <label class="field">Bucket name <input type="text" data-s="r2Bucket" spellcheck="false" /></label>
               <label class="field">Public URL <input type="url" data-s="r2PublicUrl" spellcheck="false" placeholder="https://pub-….r2.dev" /></label>
             </fieldset>
+            <fieldset>
+              <legend>Analytics</legend>
+              <p class="hint">The Worker in the backend folder scrapes your TikTok accounts every 12 hours. Saving sends it your account usernames.</p>
+              <label class="field">Worker URL <input type="url" data-s="metricsUrl" spellcheck="false" placeholder="https://openugc-metrics.….workers.dev" /></label>
+              <label class="field">API token <input type="password" id="set-metrics-token" spellcheck="false" /></label>
+            </fieldset>
             <div class="inline">
               <button type="submit" class="btn btn-primary" id="save-settings">Save settings</button>
               <button type="button" class="btn btn-quiet" id="check-buffer">Check Buffer</button>
               <button type="button" class="btn btn-quiet" id="check-r2">Check R2</button>
+              <button type="button" class="btn btn-quiet" id="check-metrics">Check analytics</button>
             </div>
           </form>
 
           <section class="transfer">
             <h2>Use on another computer</h2>
-            <p class="hint">Copy a settings code here and paste it into OpenUGC on your other computer. It brings over your keys, R2 details and accounts (usernames, Buffer links and the app each promotes). Posts stay on this computer. Because it contains your keys, only send it to yourself somewhere private.</p>
+            <p class="hint">Copy a settings code here and paste it into OpenUGC on your other computer. It brings over your keys, R2 and analytics details, and accounts (usernames, Buffer links and the app each promotes). Posts stay on this computer. Because it contains your keys, only send it to yourself somewhere private.</p>
             <button type="button" class="btn btn-quiet" id="copy-settings">Copy settings code</button>
             <label class="field transfer-paste">Paste a settings code from your other computer
               <textarea class="overview" id="import-code" rows="3" spellcheck="false"></textarea>

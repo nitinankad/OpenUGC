@@ -1,6 +1,7 @@
 // Apify REST API v2: start the TikTok scraper, check on a run, read its results.
 
 import type { ApifyItem } from "./items.ts";
+import { log } from "./log.ts";
 
 export interface ApifyEnv {
   APIFY_TOKEN: string;
@@ -17,6 +18,8 @@ export interface ApifyRun {
   defaultDatasetId: string;
   startedAt?: string;
   finishedAt?: string;
+  /** Apify's own explanation, e.g. why a run failed. */
+  statusMessage?: string;
 }
 
 export const FINISHED_OK = "SUCCEEDED";
@@ -26,13 +29,22 @@ const base = (env: ApifyEnv) => (env.APIFY_API_BASE || "https://api.apify.com/v2
 
 async function call<T>(env: ApifyEnv, path: string, init: RequestInit = {}): Promise<{ body: T; res: Response }> {
   if (!env.APIFY_TOKEN) throw new Error("APIFY_TOKEN isn't set. Run: npx wrangler secret put APIFY_TOKEN");
-  const res = await fetch(`${base(env)}${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${env.APIFY_TOKEN}`, "Content-Type": "application/json", ...(init.headers || {}) },
-  });
+  const method = init.method || "GET";
+  const where = path.split("?")[0];
+  let res: Response;
+  try {
+    res = await fetch(`${base(env)}${path}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${env.APIFY_TOKEN}`, "Content-Type": "application/json", ...(init.headers || {}) },
+    });
+  } catch (e) {
+    log.error("apify.unreachable", e, { method, path: where });
+    throw new Error(`Couldn't reach Apify (${method} ${where}): ${e instanceof Error ? e.message : e}`);
+  }
   if (!res.ok) {
-    const text = (await res.text()).slice(0, 300);
-    throw new Error(`Apify ${init.method || "GET"} ${path.split("?")[0]} failed (${res.status}): ${text}`);
+    const text = (await res.text()).slice(0, 1000);
+    log.error("apify.http", `Apify answered ${res.status}`, { method, path: where, status: res.status, body: text });
+    throw new Error(`Apify ${method} ${where} failed (${res.status}): ${text.slice(0, 300)}`);
   }
   return { body: (await res.json()) as T, res };
 }

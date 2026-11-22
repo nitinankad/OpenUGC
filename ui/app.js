@@ -146,8 +146,12 @@ function setView(view) {
   if (POST_VIEWS.includes(view) && !post()) view = "board";
   ui.view = view;
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("is-active", b.dataset.view === view));
-  for (const v of ["board", ...POST_VIEWS, "settings"]) $(`#view-${v}`).hidden = v !== view;
+  for (const v of ["board", ...POST_VIEWS, "analytics", "settings"]) $(`#view-${v}`).hidden = v !== view;
+  // The hook preview has nothing to do with analytics, so its charts get the room.
+  $(".shell").classList.toggle("no-tray", view === "analytics");
   if (view === "board") renderBoard();
+  if (view === "analytics") loadAnalytics();
+  else clearTimeout(pollTimer);
   if (view === "slides") renderSlides();
   if (view === "settings") renderSettings();
   if (view === "find") {
@@ -332,6 +336,7 @@ function saveAccountForm(form) {
   ui.editingAccount = null;
   renderAll();
   save();
+  syncProfiles();
 }
 
 function startAccountForm(id) {
@@ -374,6 +379,7 @@ function bindBoard() {
       state.posts = state.posts.filter((p) => p.accountId !== id);
       if (!post()) state.currentPostId = null;
       renderAll();
+      syncProfiles();
       return save();
     }
   });
@@ -1281,7 +1287,7 @@ async function refreshPosts() {
   for (const p of state.posts.filter((p) => p.buffer && p.buffer.status !== "sent")) {
     try {
       const fresh = await invoke("refresh_post", { id: p.buffer.id });
-      Object.assign(p.buffer, { status: fresh.status, dueAt: fresh.dueAt || p.buffer.dueAt, sentAt: fresh.sentAt });
+      Object.assign(p.buffer, { status: fresh.status, dueAt: fresh.dueAt || p.buffer.dueAt, sentAt: fresh.sentAt, externalLink: fresh.externalLink || p.buffer.externalLink });
     } catch {
       failed++;
     }
@@ -1346,6 +1352,493 @@ function bindPost() {
   });
 }
 
+/* ---------- Analytics ---------- */
+const METRICS = [
+  { key: "views", label: "Views" },
+  { key: "likes", label: "Likes" },
+  { key: "comments", label: "Comments" },
+  { key: "shares", label: "Shares" },
+  { key: "saves", label: "Saves" },
+  { key: "reposts", label: "Reposts" },
+];
+const HOUR_MS = 3_600_000;
+const an = {
+  accountId: null,
+  status: null,
+  profiles: [],
+  /** By username: posts with latest and previous numbers. */
+  videos: {},
+  /** By username: one point per scrape with every post's numbers added up. */
+  totals: {},
+  /** By video id: every snapshot of that post. */
+  history: {},
+  open: null,
+  sort: { key: "postedAt", dir: -1 },
+  loading: false,
+  scraping: false,
+  error: "",
+};
+const metricsReady = () => !!(ui.settings?.metricsUrl && ui.settings?.hasMetricsToken);
+const api = (method, path, body) => invoke("metrics", { method, path, body: body ?? null });
+const anAccounts = () => state.accounts.filter((a) => a.username);
+const anAccount = () => anAccounts().find((a) => a.id === an.accountId) || anAccounts()[0] || null;
+/** The Worker keeps usernames in lower case. */
+const metricUser = (a) => a.username.toLowerCase();
+const fmtShort = (n) => new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+const fmtDelta = (d) => (d > 0 ? `+${fmtCount(d)}` : d < 0 ? `−${fmtCount(-d)}` : "0");
+const fmtDay = (t) => new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+function timeAgo(iso) {
+  const ms = Date.now() - Date.parse(iso);
+  if (!(ms >= 0)) return "just now";
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min} minute${min === 1 ? "" : "s"} ago`;
+  const h = Math.round(ms / HOUR_MS);
+  if (h < 36) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  return ago(Date.parse(iso));
+}
+/** The Worker's scheduled scrapes start at 00:00 and 12:00 UTC. */
+function nextScrape() {
+  const d = new Date();
+  d.setUTCMinutes(0, 0, 0);
+  d.setUTCHours(d.getUTCHours() < 12 ? 12 : 24);
+  return d.toISOString();
+}
+const videoIdFromUrl = (u) => String(u || "").match(/\/(?:video|photo)\/(\d+)/)?.[1] || null;
+
+/** Tells the Worker which accounts to scrape: every account with a username. */
+let syncTimer;
+let stateLoaded = false;
+function syncProfiles() {
+  if (!metricsReady() || !stateLoaded) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncNow().catch((e) => toast(`Couldn't send your accounts to the analytics Worker: ${e}`, true)), 300);
+}
+async function syncNow() {
+  clearTimeout(syncTimer);
+  an.profiles = await api("PUT", "/profiles", { usernames: anAccounts().map(metricUser) });
+}
+
+let pollTimer;
+async function loadAnalytics() {
+  if (!metricsReady()) return renderAnalytics();
+  const a = anAccount();
+  const u = a ? metricUser(a) : null;
+  an.loading = true;
+  an.error = "";
+  renderAnalytics();
+  try {
+    const [status, profiles, videos, totals] = await Promise.all([
+      api("GET", "/status"),
+      api("GET", "/profiles"),
+      u ? api("GET", `/videos?username=${encodeURIComponent(u)}`) : null,
+      u ? api("GET", `/profiles/${encodeURIComponent(u)}/totals`) : null,
+    ]);
+    Object.assign(an, { status, profiles });
+    if (u) {
+      an.videos[u] = videos;
+      an.totals[u] = totals;
+      an.history = {};
+      await autoLink(a, videos);
+      if (an.open && videos.some((v) => v.id === an.open)) loadHistory(an.open);
+    }
+  } catch (e) {
+    an.error = String(e);
+  } finally {
+    an.loading = false;
+    renderAnalytics();
+  }
+  // While a scrape is running, look again every minute.
+  clearTimeout(pollTimer);
+  if (scrapeRunning() && ui.view === "analytics") pollTimer = setTimeout(() => refreshAnalytics(true), 60_000);
+}
+const scrapeRunning = () => (an.status?.runs || []).some((r) => r.status === "running" || r.status === "saving");
+
+async function refreshAnalytics(quiet = false) {
+  try {
+    await api("POST", "/scrape/check");
+  } catch (e) {
+    if (!quiet) toast(`${e}`, true);
+  }
+  await loadAnalytics();
+}
+
+async function scrapeNow() {
+  if (an.scraping) return;
+  an.scraping = true;
+  renderAnalytics();
+  try {
+    await syncNow();
+    const r = await api("POST", "/scrape");
+    toast(r.started ? "Scrape started. Numbers usually arrive within a few minutes." : r.reason || "A scrape is already running.");
+    await loadAnalytics();
+  } catch (e) {
+    toast(`Couldn't start a scrape: ${e}`, true);
+  } finally {
+    an.scraping = false;
+    renderAnalytics();
+  }
+}
+
+async function loadHistory(id) {
+  try {
+    an.history[id] = await api("GET", `/videos/${encodeURIComponent(id)}/history`);
+  } catch (e) {
+    an.history[id] = [];
+    toast(`Couldn't load this post's history: ${e}`, true);
+  }
+  renderAnalytics();
+}
+
+/* Linking TikTok posts to OpenUGC posts, so the numbers can be read against hooks and apps. */
+function linkFor(p, videoId, linkedBy) {
+  const a = accountOf(p);
+  return {
+    videoId,
+    postId: p.id,
+    username: a?.username || "",
+    postName: p.name,
+    hook: hookText(p.slideOptions),
+    apps: lineupFor(p).map((x) => x.trackName),
+    myApp: a?.myApp?.trackName || null,
+    myAppSlot: a?.myApp ? a.myAppSlot || 3 : null,
+    linkedBy,
+  };
+}
+const words = (t) => new Set(String(t || "").toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+function overlap(a, b) {
+  const A = words(a);
+  const B = words(b);
+  if (!A.size || !B.size) return 0;
+  let n = 0;
+  for (const w of A) if (B.has(w)) n++;
+  return n / Math.min(A.size, B.size);
+}
+
+/**
+ * Links scheduled posts to the TikTok posts they became. Buffer's link to the published post is
+ * used when it has one; otherwise the TikTok post closest to the reminder time, if its caption
+ * matches or it went out within 12 hours. Posts you unlinked by hand are left alone.
+ */
+async function autoLink(a, videos) {
+  const taken = new Set(videos.filter((v) => v.link).map((v) => v.link.postId));
+  const free = () => videos.filter((v) => !v.link);
+  const candidates = postsOf(a).filter((p) => p.buffer && !p.noAutoLink && !taken.has(p.id));
+  const links = [];
+  const claim = (p, v) => {
+    links.push(linkFor(p, v.id, "auto"));
+    v.link = { postId: p.id, postName: p.name, linkedBy: "auto" };
+    taken.add(p.id);
+  };
+  for (const p of candidates) {
+    const id = videoIdFromUrl(p.buffer.externalLink);
+    const v = id && free().find((x) => x.id === id);
+    if (v) claim(p, v);
+  }
+  const pairs = [];
+  for (const p of candidates.filter((p) => !taken.has(p.id))) {
+    const due = Date.parse(p.buffer.sentAt || p.buffer.dueAt);
+    if (!due) continue;
+    const text = postText(p.caption);
+    for (const v of free()) {
+      const gap = Math.abs(Date.parse(v.postedAt) - due);
+      if (!(gap <= 3 * DAY_MS)) continue;
+      const sim = overlap(text, v.caption);
+      if (sim >= 0.4 || (gap <= 12 * HOUR_MS && (sim >= 0.15 || !text.trim()))) pairs.push({ p, v, score: sim - gap / (3 * DAY_MS) });
+    }
+  }
+  pairs.sort((x, y) => y.score - x.score);
+  for (const { p, v } of pairs) if (!taken.has(p.id) && !v.link) claim(p, v);
+  if (!links.length) return;
+  try {
+    await api("PUT", "/links", { links });
+  } catch (e) {
+    toast(`Couldn't save post links: ${e}`, true);
+  }
+}
+
+async function setLink(videoId, postId) {
+  const v = (an.videos[metricUser(anAccount())] || []).find((x) => x.id === videoId);
+  try {
+    if (postId) {
+      const p = state.posts.find((x) => x.id === postId);
+      if (!p) return;
+      delete p.noAutoLink;
+      await api("PUT", "/links", { links: [linkFor(p, videoId, "manual")] });
+    } else {
+      // Don't link this post again automatically.
+      const old = state.posts.find((x) => x.id === v?.link?.postId);
+      if (old) old.noAutoLink = true;
+      await api("DELETE", `/links/${encodeURIComponent(videoId)}`);
+    }
+    save();
+    await loadAnalytics();
+  } catch (e) {
+    toast(`Couldn't change the link: ${e}`, true);
+  }
+}
+
+/* ---------- Charts: one metric each, so one axis and one colour ---------- */
+const charts = new Map();
+let chartSeq = 0;
+
+/** points: [{ t: ms, v: number }] oldest first. */
+function chartCard(label, points, { sub = "" } = {}) {
+  const id = `c${++chartSeq}`;
+  charts.set(id, { label, points });
+  const last = points.at(-1);
+  const prev = points.at(-2);
+  const delta = last && prev ? last.v - prev.v : null;
+  return `<figure class="chart-card">
+    <figcaption>
+      <span class="chart-label">${esc(label)}</span>
+      <span class="chart-value">${last ? esc(fmtShort(last.v)) : "None yet"}</span>
+      <span class="chart-delta">${delta == null ? esc(sub) : `${esc(fmtDelta(delta))} since the scrape before`}</span>
+    </figcaption>
+    <div class="chart" data-chart="${id}"></div>
+  </figure>`;
+}
+
+function niceStep(x) {
+  if (!(x > 0)) return 1;
+  const pow = 10 ** Math.floor(Math.log10(x));
+  const f = x / pow;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * pow;
+}
+function niceTicks(lo, hi) {
+  // Start at zero unless the line would be squashed against the top.
+  if (lo <= hi - lo) lo = 0;
+  if (hi === lo) {
+    // A flat line: show it against zero rather than an axis zoomed into nothing.
+    if (lo > 0) lo = 0;
+    else hi = lo + 1;
+  }
+  const step = Math.max(1, niceStep((hi - lo) / 3));
+  const ticks = [];
+  for (let v = Math.floor(lo / step) * step; v < hi + step; v += step) ticks.push(v);
+  return ticks.at(-1) < hi ? [...ticks, ticks.at(-1) + step] : ticks;
+}
+
+function drawChart(el) {
+  const c = charts.get(el.dataset.chart);
+  if (!c) return;
+  const pts = c.points;
+  if (!pts.length) {
+    el.innerHTML = `<p class="chart-empty">Appears after the first scrape</p>`;
+    return;
+  }
+  const W = Math.max(180, el.clientWidth);
+  const H = 132;
+  const m = { l: 46, r: 14, t: 8, b: 22 };
+  const ts = pts.map((p) => p.t);
+  let t0 = Math.min(...ts);
+  let t1 = Math.max(...ts);
+  if (t0 === t1) [t0, t1] = [t0 - 12 * HOUR_MS, t1 + 12 * HOUR_MS];
+  const ticks = niceTicks(Math.min(...pts.map((p) => p.v)), Math.max(...pts.map((p) => p.v)));
+  const [y0, y1] = [ticks[0], ticks.at(-1)];
+  const x = (t) => m.l + ((t - t0) / (t1 - t0)) * (W - m.l - m.r);
+  const y = (v) => H - m.b - ((v - y0) / (y1 - y0)) * (H - m.t - m.b);
+  const line = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
+  const area = `${line}L${x(pts.at(-1).t).toFixed(1)},${y(y0)}L${x(pts[0].t).toFixed(1)},${y(y0)}Z`;
+  const short = t1 - t0 < 2 * DAY_MS;
+  const xLabel = (t) => (short ? new Date(t).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : fmtDay(t));
+  const last = pts.at(-1);
+  el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(c.label)} over time">
+    ${ticks.map((v) => `<line class="ch-grid" x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}"/><text class="ch-axis" x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end">${esc(fmtShort(v))}</text>`).join("")}
+    <text class="ch-axis" x="${m.l}" y="${H - 5}">${esc(xLabel(pts[0].t))}</text>
+    ${pts.length > 1 ? `<text class="ch-axis" x="${W - m.r}" y="${H - 5}" text-anchor="end">${esc(xLabel(last.t))}</text>` : ""}
+    ${pts.length > 1 ? `<path class="ch-area" d="${area}"/><path class="ch-line" d="${line}"/>` : ""}
+    <circle class="ch-dot" cx="${x(last.t)}" cy="${y(last.v)}" r="4"/>
+    <line class="ch-cross" y1="${m.t}" y2="${H - m.b}" hidden/>
+    <circle class="ch-dot ch-hover" r="4" hidden/>
+  </svg><div class="ch-tip" hidden></div>`;
+  const svg = el.querySelector("svg");
+  const cross = el.querySelector(".ch-cross");
+  const dot = el.querySelector(".ch-hover");
+  const tip = el.querySelector(".ch-tip");
+  const hide = () => [cross, dot, tip].forEach((n) => n.setAttribute("hidden", ""));
+  el.onpointerleave = hide;
+  el.onpointermove = (e) => {
+    const px = e.clientX - svg.getBoundingClientRect().left;
+    let i = 0;
+    for (let k = 1; k < pts.length; k++) if (Math.abs(x(pts[k].t) - px) < Math.abs(x(pts[i].t) - px)) i = k;
+    const p = pts[i];
+    const cx = x(p.t);
+    cross.setAttribute("x1", cx);
+    cross.setAttribute("x2", cx);
+    dot.setAttribute("cx", cx);
+    dot.setAttribute("cy", y(p.v));
+    [cross, dot, tip].forEach((n) => n.removeAttribute("hidden"));
+    const d = i ? p.v - pts[i - 1].v : null;
+    tip.innerHTML = `<span class="ch-tip-when">${esc(fmtWhen(new Date(p.t).toISOString()))}</span><b>${esc(fmtCount(p.v))}</b> ${esc(c.label.toLowerCase())}${d == null ? "" : `<span class="ch-tip-d">${esc(fmtDelta(d))} since the scrape before</span>`}`;
+    const tw = tip.offsetWidth;
+    tip.style.left = `${Math.min(Math.max(cx - tw / 2, 0), W - tw)}px`;
+  };
+}
+const drawCharts = () => document.querySelectorAll("#view-analytics .chart[data-chart]").forEach(drawChart);
+
+/** One chart per metric. Reposts only show if TikTok reported any. */
+function metricCharts(rows, { followers = false } = {}) {
+  const series = (key) => rows.filter((r) => r[key] != null).map((r) => ({ t: Date.parse(r.scrapedAt), v: r[key] }));
+  const list = followers ? [{ key: "followers", label: "Followers" }, ...METRICS] : METRICS;
+  return list
+    .filter((m) => m.key !== "reposts" || rows.some((r) => r.reposts != null))
+    .map((m) => chartCard(m.label, series(m.key)))
+    .join("");
+}
+
+function renderAnalytics() {
+  if (ui.view !== "analytics") return;
+  const ready = metricsReady();
+  const accts = anAccounts();
+  const a = anAccount();
+  if (a) an.accountId = a.id;
+  const u = a ? metricUser(a) : null;
+  $("#an-setup").hidden = ready;
+  $("#an-actions").hidden = !ready || !accts.length;
+  $("#an-account").innerHTML = accts.map((x) => `<option value="${esc(x.id)}" ${x.id === a?.id ? "selected" : ""}>${esc(handle(x))}</option>`).join("");
+  const running = scrapeRunning();
+  $("#an-refresh").disabled = an.loading;
+  $("#an-refresh").textContent = an.loading ? "Refreshing" : "Refresh";
+  $("#an-scrape").disabled = an.scraping || running;
+  $("#an-scrape").textContent = an.scraping ? "Starting" : running ? "Scraping" : "Scrape now";
+
+  // Status line under the title.
+  const runs = an.status?.runs || [];
+  const live = runs.find((r) => r.status === "running" || r.status === "saving");
+  const done = runs.find((r) => r.status === "done");
+  let status = "Views, likes, comments, shares and saves for every TikTok post, scraped every 12 hours.";
+  if (ready && an.status) {
+    if (live) status = `Scraping now, started ${timeAgo(live.started_at)}. ${live.status === "saving" ? "Saving the results." : "This usually takes a few minutes."}`;
+    else if (done) status = `Last scraped ${timeAgo(done.finished_at || done.started_at)}. Next scrape ${fmtWhen(nextScrape())}.`;
+    else status = "No scrapes yet. Press Scrape now for the first one.";
+    if (runs[0]?.status === "failed") status += ` The last try failed: ${runs[0].error || "unknown error"}.`;
+  }
+  $("#an-status").textContent = status;
+
+  const profile = an.profiles.find((p) => p.username === u);
+  const totals = (u && an.totals[u]) || [];
+  const videos = (u && an.videos[u]) || [];
+  let note = "";
+  if (an.error) note = an.error;
+  else if (ready && !accts.length) note = "Add an account with a TikTok username on the Posts page first.";
+  else if (profile?.lastError) note = `TikTok didn't return @${u} on the last scrape (${profile.lastError}). Private accounts can't be scraped.`;
+  else if (ready && an.status && u && !totals.length && !an.loading) note = `No numbers for @${u} yet. They appear after its first scrape.`;
+  $("#an-note").hidden = !note;
+  $("#an-note").textContent = note;
+  $("#an-note").classList.toggle("is-error", !!an.error || !!profile?.lastError);
+
+  charts.clear();
+  const showTotals = ready && totals.length > 0;
+  $("#an-totals").hidden = !showTotals;
+  if (showTotals) {
+    const last = totals.at(-1);
+    $("#an-totals-sub").textContent = `${fmtCount(last.posts)} post${last.posts === 1 ? "" : "s"}, numbers added up at each scrape`;
+    $("#an-charts").innerHTML = metricCharts(totals, { followers: true });
+  }
+  $("#an-posts").hidden = !ready || !videos.length;
+  if (videos.length) renderPostTable(a, videos);
+  drawCharts();
+}
+
+function renderPostTable(a, videos) {
+  const hasReposts = videos.some((v) => v.latest?.reposts != null);
+  const cols = METRICS.filter((m) => m.key !== "reposts" || hasReposts);
+  const { key, dir } = an.sort;
+  const val = (v) => (key === "postedAt" ? Date.parse(v.postedAt) || 0 : key === "change" ? change(v) : v.latest?.[key] ?? -1);
+  const sorted = [...videos].sort((x, y) => (val(x) - val(y)) * dir);
+  const table = $("#view-analytics .an-table");
+  table.style.setProperty("--an-cols", `minmax(220px, 3fr) repeat(${cols.length + 1}, minmax(70px, 1fr))`);
+  const head = (k, label) =>
+    `<button type="button" class="an-sort ${key === k ? "is-on" : ""}" data-sort="${k}" role="columnheader" aria-sort="${key === k ? (dir < 0 ? "descending" : "ascending") : "none"}">${esc(label)}${key === k ? (dir < 0 ? " ↓" : " ↑") : ""}</button>`;
+  $("#an-thead").innerHTML = head("postedAt", "Post") + cols.map((m) => head(m.key, m.label)).join("") + head("change", "New views");
+  $("#an-posts-sub").textContent = `${videos.length} on TikTok. Click a post to see it over time.`;
+  const posts = postsOf(a);
+  $("#an-rows").innerHTML = sorted
+    .map((v) => {
+      const open = an.open === v.id;
+      const ch = change(v);
+      const link = v.link && state.posts.find((p) => p.id === v.link.postId);
+      const row = `<div class="an-row ${open ? "is-open" : ""}" role="row" tabindex="0" data-video="${esc(v.id)}" aria-expanded="${open}">
+        <div class="an-post" role="cell">
+          <span class="an-caption">${esc((v.caption || "No caption").slice(0, 120))}</span>
+          <span class="an-meta">${v.postedAt ? esc(fmtDay(Date.parse(v.postedAt))) : "Unknown date"}${v.isSlideshow ? ", slideshow" : ""}${v.isPinned ? ", pinned" : ""}${link ? `. <span class="an-linked">${esc(link.name)}</span>` : ""}</span>
+        </div>
+        ${cols.map((m) => `<div class="num" role="cell">${v.latest?.[m.key] == null ? "–" : esc(fmtCount(v.latest[m.key]))}</div>`).join("")}
+        <div class="num an-change" role="cell">${ch == null ? "–" : esc(fmtDelta(ch))}</div>
+      </div>`;
+      if (!open) return row;
+      const hist = an.history[v.id];
+      return `${row}<div class="an-detail">
+        <div class="charts charts-tight">${hist ? metricCharts(hist) : `<p class="loading-row"><span class="spinner"></span>Loading this post's history</p>`}</div>
+        <div class="an-detail-actions">
+          <label class="an-link-pick">OpenUGC post
+            <select data-link-video="${esc(v.id)}">
+              <option value="">Not linked</option>
+              ${posts.map((p) => `<option value="${esc(p.id)}" ${link?.id === p.id ? "selected" : ""}>${esc(p.name)}${p.buffer?.dueAt ? `, ${esc(fmtDay(Date.parse(p.buffer.dueAt)))}` : ""}</option>`).join("")}
+            </select>
+          </label>
+          ${link ? `<button type="button" class="btn btn-quiet" data-open-post="${esc(link.id)}">Open ${esc(link.name)}</button>` : ""}
+          ${v.url ? `<button type="button" class="btn btn-quiet" data-tiktok="${esc(v.url)}">Open on TikTok</button>` : ""}
+          ${v.link ? `<span class="an-meta">${v.link.linkedBy === "auto" ? "Linked automatically" : "Linked by you"}</span>` : ""}
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+/** Views gained since the scrape before. */
+const change = (v) => (v.latest?.views != null && v.previous?.views != null ? v.latest.views - v.previous.views : null);
+
+function bindAnalytics() {
+  $("#an-account").addEventListener("change", (e) => {
+    an.accountId = e.target.value;
+    an.open = null;
+    loadAnalytics();
+  });
+  $("#an-refresh").addEventListener("click", () => refreshAnalytics());
+  $("#an-scrape").addEventListener("click", scrapeNow);
+  const view = $("#view-analytics");
+  const toggle = (row) => {
+    const id = row.dataset.video;
+    an.open = an.open === id ? null : id;
+    if (an.open && !an.history[id]) loadHistory(id);
+    renderAnalytics();
+  };
+  view.addEventListener("click", (e) => {
+    const t = (sel) => e.target.closest(sel);
+    let b;
+    if ((b = t("[data-sort]"))) {
+      const k = b.dataset.sort;
+      an.sort = { key: k, dir: an.sort.key === k ? -an.sort.dir : -1 };
+      return renderAnalytics();
+    }
+    if ((b = t("[data-open-post]"))) return openPost(b.dataset.openPost);
+    if ((b = t("[data-tiktok]"))) return window.__TAURI__.opener.openUrl(b.dataset.tiktok).catch((err) => toast(`Couldn't open TikTok: ${err}`, true));
+    if ((b = t("[data-video]"))) toggle(b);
+  });
+  view.addEventListener("keydown", (e) => {
+    const row = e.target.closest?.("[data-video]");
+    if (row && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      toggle(row);
+    }
+  });
+  view.addEventListener("change", (e) => {
+    const s = e.target.closest("[data-link-video]");
+    if (s) setLink(s.dataset.linkVideo, s.value);
+  });
+  // Charts are drawn to their pixel width, so redraw them when the width changes (not the height).
+  let frame;
+  let width = 0;
+  new ResizeObserver(([e]) => {
+    const w = Math.round(e.contentRect.width);
+    if (w === width) return;
+    width = w;
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(drawCharts);
+  }).observe($("#an-body"));
+}
+
 /* ---------- Settings ---------- */
 const SAVED_HINT = "Saved. Type a new key to replace it.";
 
@@ -1356,6 +1849,7 @@ function renderSettings() {
   });
   $("#set-buffer-key").placeholder = s.hasBufferKey ? SAVED_HINT : "";
   $("#set-r2-secret").placeholder = s.hasR2Secret ? SAVED_HINT : "";
+  $("#set-metrics-token").placeholder = s.hasMetricsToken ? SAVED_HINT : "";
 }
 
 async function saveSettings({ quiet = false } = {}) {
@@ -1363,10 +1857,13 @@ async function saveSettings({ quiet = false } = {}) {
   document.querySelectorAll("[data-s]").forEach((el) => (settings[el.dataset.s] = el.value.trim()));
   const bufferKey = $("#set-buffer-key").value.trim() || null;
   const r2Secret = $("#set-r2-secret").value.trim() || null;
+  const metricsToken = $("#set-metrics-token").value.trim() || null;
   try {
-    ui.settings = await invoke("save_settings", { settings, bufferKey, r2Secret });
+    ui.settings = await invoke("save_settings", { settings, bufferKey, r2Secret, metricsToken });
     $("#set-buffer-key").value = "";
     $("#set-r2-secret").value = "";
+    $("#set-metrics-token").value = "";
+    syncProfiles();
     if (bufferKey) ui.post.channels = null;
     renderSettings();
     renderPost();
@@ -1428,6 +1925,7 @@ async function importSettingsCode() {
       settings: b.settings || {},
       bufferKey: b.bufferKey || null,
       r2Secret: b.r2Secret || null,
+      metricsToken: b.metricsToken || null,
     });
     const prefs = b.prefs || {};
     if (prefs.writer) state.writer = prefs.writer;
@@ -1453,6 +1951,7 @@ async function importSettingsCode() {
     save();
     renderSettings();
     renderAll();
+    syncProfiles();
     toast("Settings imported");
   } catch (e) {
     toast(`Couldn't import the settings: ${e}`, true);
@@ -1477,6 +1976,14 @@ function bindSettings() {
   cr.addEventListener("click", () =>
     runCheck(cr, "Check R2", async () => `R2 works. Uploaded a test file and loaded it from ${await invoke("check_r2")}`),
   );
+  const cm = $("#check-metrics");
+  cm.addEventListener("click", () =>
+    runCheck(cm, "Check analytics", async () => {
+      await syncNow();
+      const st = await api("GET", "/status");
+      return `Analytics works. The Worker is tracking ${st.profiles} account${st.profiles === 1 ? "" : "s"} and ${fmtCount(st.videos)} post${st.videos === 1 ? "" : "s"}.`;
+    }),
+  );
   $("#copy-settings").addEventListener("click", copySettingsCode);
   $("#import-settings").addEventListener("click", importSettingsCode);
 }
@@ -1495,6 +2002,7 @@ function renderAll() {
   renderTray();
   renderPrepared();
   if (ui.view === "board") renderBoard();
+  renderAnalytics();
 }
 
 function bind() {
@@ -1592,6 +2100,7 @@ async function init() {
   try {
     const saved = migrate(await invoke("load_state"));
     if (saved) Object.assign(state, saved, { filter: { ...state.filter, ...(saved.filter || {}) } });
+    stateLoaded = true;
   } catch (e) {
     toast(`Couldn't load saved work: ${e}`, true);
   }
@@ -1612,12 +2121,14 @@ async function init() {
   bindMine();
   bindPost();
   bindSettings();
+  bindAnalytics();
   renderSlideSettings();
   renderAll();
   setView("board");
   // Nudge an account carried over from before accounts existed to get a username.
   const unnamed = state.accounts.find((a) => !a.username);
   if (unnamed) startAccountForm(unnamed.id);
+  syncProfiles();
   save();
 }
 

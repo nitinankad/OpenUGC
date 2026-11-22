@@ -8,6 +8,12 @@ compatibility_date = "2025-09-01"
 [triggers]
 crons = ["0 */12 * * *", "*/10 * * * *"]
 
+# Keep every log line for 7 days: dashboard → Workers & Pages → openugc-metrics → Logs.
+# `npx wrangler tail` shows them live.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [[d1_databases]]
 binding = "DB"
 database_name = "openugc-metrics"
