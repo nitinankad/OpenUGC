@@ -8,6 +8,7 @@ use std::path::Path;
 const KEYCHAIN_SERVICE: &str = "com.openugc.OpenUGC";
 const BUFFER_KEY: &str = "buffer-api-key";
 const R2_SECRET: &str = "r2-secret-access-key";
+const METRICS_TOKEN: &str = "metrics-api-token";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -17,6 +18,8 @@ pub struct Settings {
     pub r2_bucket: String,
     /// Public base URL for the bucket, e.g. https://pub-xxxx.r2.dev or a custom domain.
     pub r2_public_url: String,
+    /// The OpenUGC metrics Worker, e.g. https://openugc-metrics.you.workers.dev
+    pub metrics_url: String,
 }
 
 /// What the UI sees: the plain settings plus whether each secret is stored.
@@ -27,6 +30,7 @@ pub struct SettingsView {
     pub settings: Settings,
     pub has_buffer_key: bool,
     pub has_r2_secret: bool,
+    pub has_metrics_token: bool,
 }
 
 pub fn load(dir: &Path) -> Settings {
@@ -41,16 +45,24 @@ pub fn view(dir: &Path) -> SettingsView {
         settings: load(dir),
         has_buffer_key: secret(BUFFER_KEY).is_some(),
         has_r2_secret: secret(R2_SECRET).is_some(),
+        has_metrics_token: secret(METRICS_TOKEN).is_some(),
     }
 }
 
 /// Saves plain settings. For each secret: None leaves it alone, "" deletes it, anything else replaces it.
-pub fn save(dir: &Path, s: &Settings, buffer_key: Option<String>, r2_secret: Option<String>) -> Result<()> {
+pub fn save(
+    dir: &Path,
+    s: &Settings,
+    buffer_key: Option<String>,
+    r2_secret: Option<String>,
+    metrics_token: Option<String>,
+) -> Result<()> {
     let clean = Settings {
         r2_account_id: s.r2_account_id.trim().to_string(),
         r2_access_key_id: s.r2_access_key_id.trim().to_string(),
         r2_bucket: s.r2_bucket.trim().to_string(),
         r2_public_url: s.r2_public_url.trim().trim_end_matches('/').to_string(),
+        metrics_url: s.metrics_url.trim().trim_end_matches('/').to_string(),
     };
     let tmp = dir.join("settings.json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&clean)?)?;
@@ -60,6 +72,9 @@ pub fn save(dir: &Path, s: &Settings, buffer_key: Option<String>, r2_secret: Opt
     }
     if let Some(v) = r2_secret {
         set_secret(R2_SECRET, v.trim())?;
+    }
+    if let Some(v) = metrics_token {
+        set_secret(METRICS_TOKEN, v.trim())?;
     }
     Ok(())
 }
@@ -71,6 +86,7 @@ pub struct Export {
     pub settings: Settings,
     pub buffer_key: String,
     pub r2_secret: String,
+    pub metrics_token: String,
 }
 
 pub fn export(dir: &Path) -> Export {
@@ -78,6 +94,7 @@ pub fn export(dir: &Path) -> Export {
         settings: load(dir),
         buffer_key: secret(BUFFER_KEY).unwrap_or_default(),
         r2_secret: secret(R2_SECRET).unwrap_or_default(),
+        metrics_token: secret(METRICS_TOKEN).unwrap_or_default(),
     }
 }
 
@@ -87,6 +104,10 @@ pub fn buffer_key() -> Result<String> {
 
 pub fn r2_secret() -> Result<String> {
     secret(R2_SECRET).context("Add your R2 secret access key in Settings first")
+}
+
+pub fn metrics_token() -> Result<String> {
+    secret(METRICS_TOKEN).context("Add your analytics API token in Settings first")
 }
 
 fn entry(name: &str) -> Result<keyring::Entry> {

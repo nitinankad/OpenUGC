@@ -5,6 +5,7 @@ mod appstore;
 mod buffer;
 mod caption;
 mod hooks;
+mod metrics;
 mod prepare;
 mod r2;
 mod settings;
@@ -115,9 +116,10 @@ fn save_settings(
     settings: settings::Settings,
     buffer_key: Option<String>,
     r2_secret: Option<String>,
+    metrics_token: Option<String>,
 ) -> CmdResult<settings::SettingsView> {
     let dir = data_dir(&app)?;
-    settings::save(&dir, &settings, buffer_key, r2_secret).map_err(|e| format!("{e:#}"))?;
+    settings::save(&dir, &settings, buffer_key, r2_secret, metrics_token).map_err(|e| format!("{e:#}"))?;
     Ok(settings::view(&dir))
 }
 
@@ -183,6 +185,13 @@ async fn refresh_post(id: String) -> CmdResult<buffer::BufferPost> {
     blocking(move || buffer::get_post(&settings::buffer_key()?, &id)).await
 }
 
+/// A request to the analytics Worker, e.g. ("GET", "/videos?username=x", None).
+#[tauri::command]
+async fn metrics(app: AppHandle, method: String, path: String, body: Option<serde_json::Value>) -> CmdResult<serde_json::Value> {
+    let url = settings::load(&data_dir(&app)?).metrics_url;
+    blocking(move || metrics::request(&url, &settings::metrics_token()?, &method, &path, body)).await
+}
+
 #[tauri::command]
 fn load_state(app: AppHandle) -> CmdResult<serde_json::Value> {
     let path = data_dir(&app)?.join("state.json");
@@ -221,6 +230,7 @@ fn main() {
             buffer_channels,
             schedule_post,
             refresh_post,
+            metrics,
             load_state,
             save_state
         ])

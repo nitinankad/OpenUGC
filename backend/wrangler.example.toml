@@ -1,0 +1,26 @@
+# Copy to wrangler.toml (which is gitignored) and fill in database_id.
+
+name = "openugc-metrics"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# 00:00 and 12:00 UTC: start a scrape. Every 10 minutes: save the results of any finished scrape.
+[triggers]
+crons = ["0 */12 * * *", "*/10 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "openugc-metrics"
+database_id = "00000000-0000-0000-0000-000000000000" # from `npx wrangler d1 create openugc-metrics`
+migrations_dir = "migrations"
+
+[vars]
+APIFY_ACTOR = "clockworks~tiktok-scraper"
+# Posts scraped per profile, newest first. High enough to cover every post; Apify charges per post.
+MAX_POSTS_PER_PROFILE = "1000"
+# Optional spending cap per scrape in US dollars, passed to Apify ("" = no cap).
+MAX_CHARGE_USD = ""
+
+# Secrets (set with `npx wrangler secret put NAME`, and for local dev in .dev.vars):
+#   APIFY_TOKEN  your Apify API token
+#   API_TOKEN    a long random string; the OpenUGC app sends it to read the data
