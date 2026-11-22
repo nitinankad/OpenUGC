@@ -379,6 +379,41 @@ function bindBoard() {
   });
 }
 
+/* ---------- Repeat guard ---------- */
+/** Uses within this many days (and drafts, which are still to come) count as recent. */
+const RECENT_DAYS = 30;
+const DAY_MS = 86_400_000;
+const isMade = (p) => !!(p.slides || p.buffer);
+/** When a post goes (or went) out: its Buffer time, else when its slides were made, else when it was created. */
+const postTime = (p) => (p.buffer?.dueAt ? Date.parse(p.buffer.dueAt) : p.slides?.renderedAt || p.createdAt);
+const hookKey = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const isRecent = (p) => !isMade(p) || Math.abs(Date.now() - postTime(p)) <= RECENT_DAYS * DAY_MS;
+function ago(t) {
+  const d = Math.round((Date.now() - t) / DAY_MS);
+  if (d < 0) return d === -1 ? "tomorrow" : `in ${-d} days`;
+  return d === 0 ? "today" : d === 1 ? "yesterday" : `${d} days ago`;
+}
+const repeatLabel = (p) => (isMade(p) ? `${p.name}, ${ago(postTime(p))}` : `${p.name} (draft)`);
+
+/** This account's other posts with the app, newest first. */
+function appRepeats(id, p = post()) {
+  const a = accountOf(p);
+  if (!a) return [];
+  return postsOf(a)
+    .filter((q) => q.id !== p.id && q.picked.some((x) => x.trackId === id))
+    .sort((x, y) => postTime(y) - postTime(x));
+}
+
+/** This account's other posts that went out with the same hook. Drafts don't count: new posts start with the last post's hook. */
+function hookRepeats(text, p = post()) {
+  const a = accountOf(p);
+  const key = hookKey(text);
+  if (!a || !key) return [];
+  return postsOf(a)
+    .filter((q) => q.id !== p?.id && isMade(q) && hookKey(hookText(q.slideOptions)) === key)
+    .sort((x, y) => postTime(y) - postTime(x));
+}
+
 /* ---------- Find ---------- */
 function renderResults() {
   const list = $("#results");
@@ -406,12 +441,17 @@ function renderResults() {
       const on = isPicked(a.trackId);
       const mine = isMine(a.trackId);
       const icon = a.artworkUrl100 || a.artworkUrl512 || "";
+      const reps = mine ? [] : appRepeats(a.trackId);
+      const used = reps.length
+        ? `<span class="repeat ${isRecent(reps[0]) ? "is-recent" : ""}" title="Used in ${esc(reps.map(repeatLabel).join("; "))}">Used in ${esc(repeatLabel(reps[0]))}${reps.length > 1 ? ` +${reps.length - 1}` : ""}</span>`
+        : "";
       return `<li class="row ${on ? "is-picked" : ""}">
         <div class="ident">
           <img class="icon" src="${esc(icon)}" alt="" loading="lazy" />
           <div class="ident-text">
             <span class="name" title="${esc(a.trackName)}">${esc(a.trackName)}</span>
             <span class="sub">${esc(a.artistName)}</span>
+            ${used}
           </div>
         </div>
         <div>
@@ -606,6 +646,19 @@ function renderTray() {
         ? `${n} of ${MAX_APPS} apps added`
         : "Hook slide is full";
 
+  // Warn about apps this account showed recently; older repeats only get a note in the results.
+  const recent = (p ? picked() : [])
+    .map((a) => ({ a, q: appRepeats(a.trackId).find(isRecent) }))
+    .filter((r) => r.q);
+  const warn = $("#tray-repeats");
+  warn.hidden = !recent.length;
+  warn.textContent = recent.length
+    ? `Already on ${handle(acct())} recently: ${recent.map(({ a, q }) => `${a.trackName} (${repeatLabel(q)})`).join(", ")}.`
+    : "";
+  document.querySelectorAll("#home-grid [data-unpick]").forEach((b) => {
+    b.parentElement.classList.toggle("is-repeat", recent.some((r) => String(r.a.trackId) === b.dataset.unpick));
+  });
+
   const btn = $("#prepare-btn");
   btn.disabled = todo === 0;
   btn.textContent = working
@@ -751,19 +804,96 @@ function renderHookIdeas() {
     btn.textContent = ui.hooking ? `${writer} is writing hooks` : has ? "More hook ideas" : `Suggest hooks with ${writer}`;
   });
   document.querySelectorAll("[data-hook-clear]").forEach((b) => (b.hidden = !has || ui.hooking));
-  const current = hookText(o).toLowerCase();
-  const html = (p?.hookIdeas || [])
+  const current = hookKey(hookText(o));
+  const saved = savedHooks();
+  const isSaved = (h) => saved.some((s) => hookKey(ideaText(s)) === hookKey(ideaText(h)));
+  const label = (h) => `<b style="color:${esc(o.accent)}">${esc(h.accent)}</b> ${[h.line2, h.line3].filter(Boolean).map(esc).join(" ")}`;
+  const usedTag = (h) => {
+    const reps = p ? hookRepeats(ideaText(h)) : [];
+    return reps.length ? ` <span class="repeat ${isRecent(reps[0]) ? "is-recent" : ""}">used in ${esc(reps[0].name)}</span>` : "";
+  };
+  const ideas = (p?.hookIdeas || [])
     .map((h, i) => {
-      const on = ideaText(h).toLowerCase() === current;
-      const rest = [h.line2, h.line3].filter(Boolean).map(esc).join(" ");
-      return `<li><button type="button" data-hook="${i}" class="${on ? "is-on" : ""}"><b style="color:${esc(o.accent)}">${esc(h.accent)}</b> ${rest}</button></li>`;
+      const on = hookKey(ideaText(h)) === current;
+      const star = isSaved(h);
+      return `<li class="hook-item">
+        <button type="button" class="hook-pick ${on ? "is-on" : ""}" data-hook="${i}">${label(h)}${usedTag(h)}</button>
+        <button type="button" class="hook-side hook-star ${star ? "is-on" : ""}" data-star="${i}" aria-pressed="${star}" aria-label="${star ? "Remove from saved hooks" : "Save hook"}" title="${star ? "Saved. Click to remove." : "Save for later"}">${star ? "★" : "☆"}</button>
+      </li>`;
     })
     .join("");
-  document.querySelectorAll(".hook-ideas").forEach((ul) => (ul.innerHTML = html));
+  document.querySelectorAll(".hook-ideas:not(.hook-saved)").forEach((ul) => (ul.innerHTML = ideas));
+
+  const savedHtml = saved
+    .map((h, i) => {
+      const on = hookKey(ideaText(h)) === current;
+      return `<li class="hook-item">
+        <button type="button" class="hook-pick ${on ? "is-on" : ""}" data-saved-hook="${i}">${label(h)}${usedTag(h)}</button>
+        <button type="button" class="hook-side" data-unsave="${i}" aria-label="Remove from saved hooks" title="Remove">×</button>
+      </li>`;
+    })
+    .join("");
+  document.querySelectorAll(".hook-saved").forEach((ul) => (ul.innerHTML = savedHtml));
+  document.querySelectorAll("[data-saved-hooks]").forEach((d) => (d.hidden = !p));
+  document.querySelectorAll("[data-saved-count]").forEach((s) => (s.textContent = saved.length ? `(${saved.length})` : ""));
+  document.querySelectorAll("[data-saved-empty]").forEach((e) => (e.hidden = saved.length > 0));
+  const curSaved = isSaved({ accent: o.hookAccent, line2: o.hookLine2, line3: o.hookLine3 });
+  document.querySelectorAll("[data-hook-save]").forEach((b) => {
+    b.disabled = !p || !current || curSaved;
+    b.textContent = curSaved ? "Hook saved" : "Save this hook";
+  });
+
+  // Repeat guard for the hook in the fields.
+  const reps = p ? hookRepeats(hookText(o)) : [];
+  document.querySelectorAll("[data-hook-repeat]").forEach((el) => {
+    el.hidden = !reps.length;
+    el.classList.toggle("is-old", !!reps.length && !isRecent(reps[0]));
+    el.textContent = reps.length
+      ? `${handle(acct())} already used this hook in ${reps.map(repeatLabel).join("; ")}. ${isRecent(reps[0]) ? "Pick a new one so the account doesn't look repetitive." : "It was a while ago, so reusing it is probably fine."}`
+      : "";
+  });
+
   const rest = [o.hookLine2, o.hookLine3].filter(Boolean).map(esc).join(" ");
   $("#find-hook-text").innerHTML = p
     ? `This post's hook: <b style="color:${esc(o.accent)}">${esc(o.hookAccent)}</b> ${rest}. Pick a new one, then Ask ${esc(writer)} for apps that fit it.`
     : "";
+}
+
+/* Saved hooks belong to the account, so they're there for every post (and go with the settings code). */
+const savedHooks = () => acct()?.savedHooks || [];
+const MAX_SAVED_HOOKS = 100;
+
+function saveHook(h) {
+  const a = acct();
+  const hook = { accent: String(h.accent || "").trim(), line2: String(h.line2 || "").trim(), line3: String(h.line3 || "").trim() };
+  if (!a || !hookKey(ideaText(hook))) return;
+  const key = hookKey(ideaText(hook));
+  a.savedHooks = [{ ...hook, savedAt: Date.now() }, ...(a.savedHooks || []).filter((s) => hookKey(ideaText(s)) !== key)].slice(0, MAX_SAVED_HOOKS);
+  renderHookIdeas();
+  save();
+}
+
+function unsaveHook(h) {
+  const a = acct();
+  if (!a) return;
+  const key = hookKey(ideaText(h));
+  a.savedHooks = (a.savedHooks || []).filter((s) => hookKey(ideaText(s)) !== key);
+  renderHookIdeas();
+  save();
+}
+
+function toggleStar(i) {
+  const h = post()?.hookIdeas?.[i];
+  if (!h) return;
+  const key = hookKey(ideaText(h));
+  if (savedHooks().some((s) => hookKey(ideaText(s)) === key)) unsaveHook(h);
+  else saveHook(h);
+}
+
+function saveCurrentHook() {
+  const o = opts();
+  saveHook({ accent: o.hookAccent, line2: o.hookLine2, line3: o.hookLine3 });
+  toast("Hook saved");
 }
 
 /** Hooks this account has already used, so new ones take a different angle. */
@@ -773,6 +903,7 @@ function usedHooks(p) {
   for (const q of a ? postsOf(a) : []) if (q.id !== p.id && q.slides) used.add(hookText(q.slideOptions));
   for (const h of p.hookIdeas || []) used.add(ideaText(h));
   for (const t of p.seenHooks || []) used.add(t);
+  for (const h of a?.savedHooks || []) used.add(ideaText(h));
   return [...used].filter(Boolean);
 }
 
@@ -811,10 +942,9 @@ function clearHooks() {
   save();
 }
 
-function useHook(i) {
+function useHook(h) {
   const p = post();
-  const h = p?.hookIdeas?.[i];
-  if (!h) return;
+  if (!p || !h) return;
   Object.assign(p.slideOptions, { hookAccent: h.accent, hookLine2: h.line2 || "", hookLine3: h.line3 || "" });
   renderSlideSettings();
   renderTray();
@@ -882,8 +1012,13 @@ function bindSlides() {
   document.addEventListener("click", (e) => {
     if (e.target.closest("[data-hook-suggest]")) return suggestHooks();
     if (e.target.closest("[data-hook-clear]")) return clearHooks();
-    const b = e.target.closest(".hook-ideas [data-hook]");
-    if (b) useHook(Number(b.dataset.hook));
+    if (e.target.closest("[data-hook-save]")) return saveCurrentHook();
+    const t = e.target.closest(".hook-ideas button");
+    if (!t) return;
+    if (t.dataset.hook) useHook(post()?.hookIdeas?.[Number(t.dataset.hook)]);
+    else if (t.dataset.star) toggleStar(Number(t.dataset.star));
+    else if (t.dataset.savedHook) useHook(savedHooks()[Number(t.dataset.savedHook)]);
+    else if (t.dataset.unsave) unsaveHook(savedHooks()[Number(t.dataset.unsave)]);
   });
   $("#make-slides").addEventListener("click", makeSlides);
   $("#show-folder").addEventListener("click", () => {
@@ -1300,7 +1435,15 @@ async function importSettingsCode() {
     for (const a of prefs.accounts || []) {
       const i = state.accounts.findIndex((x) => x.id === a.id);
       if (i === -1) state.accounts.push(a);
-      else state.accounts[i] = { ...state.accounts[i], ...a };
+      else {
+        // Keep saved hooks from both computers.
+        const mine = state.accounts[i].savedHooks || [];
+        const theirs = a.savedHooks || [];
+        const savedHooks = [...theirs, ...mine]
+          .filter((h, k, all) => all.findIndex((x) => hookKey(ideaText(x)) === hookKey(ideaText(h))) === k)
+          .sort((x, y) => (y.savedAt || 0) - (x.savedAt || 0));
+        state.accounts[i] = { ...state.accounts[i], ...a, savedHooks };
+      }
     }
     // Codes from before accounts existed carry a single app.
     if (prefs.myApp) for (const a of state.accounts) if (!a.myApp) Object.assign(a, { myApp: prefs.myApp, myAppSlot: prefs.myAppSlot || 3 });
@@ -1355,7 +1498,7 @@ function renderAll() {
 }
 
 function bind() {
-  document.querySelectorAll(".nav-item").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+  document.querySelectorAll(".nav-item[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
   $("#search-form").addEventListener("submit", (e) => {
     e.preventDefault();
     search();

@@ -171,8 +171,12 @@ fn hook_slide(f: &Fonts, pal: &Palette, o: &SlideOptions, icons: &[Option<Pixmap
 
     // Phone first so the headline always sits on top of its shadow.
     let phone = phone_mockup(pal, icons);
-    let quad = [(720.0, 905.0), (2050.0, 785.0), (2110.0, 3730.0), (705.0, 3610.0)];
-    drop_shadow(&mut pm, &quad, (46.0, 34.0), 0.42);
+    // Shrunk around the middle of its top edge, so the top stays put and it still runs off the bottom.
+    const PHONE_SCALE: f32 = 0.88;
+    let (ax, ay) = (1385.0, 845.0);
+    let quad = [(720.0, 905.0), (2050.0, 785.0), (2110.0, 3730.0), (705.0, 3610.0)]
+        .map(|(x, y): (f32, f32)| (ax + (x - ax) * PHONE_SCALE, ay + (y - ay) * PHONE_SCALE));
+    drop_shadow(&mut pm, &quad, (46.0 * PHONE_SCALE, 34.0 * PHONE_SCALE), 0.42);
     warp_onto(&mut pm, &phone, &quad);
 
     // Shrink all three lines together until the widest fits, keeping the top edge in place.
