@@ -6,7 +6,6 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use std::path::Path;
 
 pub struct R2 {
     account_id: String,
@@ -40,15 +39,9 @@ impl R2 {
         })
     }
 
-    /// Uploads a file and returns its public URL.
-    pub fn upload_file(&self, key: &str, path: &Path) -> Result<String> {
-        let bytes = std::fs::read(path).with_context(|| format!("Couldn't read {}", path.display()))?;
-        let content_type = match path.extension().and_then(|e| e.to_str()) {
-            Some("png") => "image/png",
-            Some("jpg" | "jpeg") => "image/jpeg",
-            _ => "application/octet-stream",
-        };
-        self.put(key, bytes, content_type)?;
+    /// Uploads bytes and returns their public URL.
+    pub fn upload_bytes(&self, key: &str, body: Vec<u8>, content_type: &str) -> Result<String> {
+        self.put(key, body, content_type)?;
         Ok(format!("{}/{}", self.public_url, key))
     }
 

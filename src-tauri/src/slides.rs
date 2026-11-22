@@ -707,6 +707,39 @@ fn save_jpeg(pm: &Pixmap, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// TikTok rejects photos over 2,073,600 pixels (1920 × 1080).
+const TIKTOK_MAX_PIXELS: u64 = 2_073_600;
+/// TikTok's standard photo width; a 4:5 slide becomes 1080 × 1350.
+const TIKTOK_WIDTH: u32 = 1080;
+
+/// A slide as JPEG bytes small enough for TikTok. Slides stay full size on disk; only the
+/// uploaded copy is scaled down.
+pub fn tiktok_jpeg(path: &Path) -> Result<Vec<u8>> {
+    let img = image::open(path).with_context(|| format!("Couldn't open {}", path.display()))?.to_rgb8();
+    let (w, h) = img.dimensions();
+    let img = if u64::from(w) * u64::from(h) > TIKTOK_MAX_PIXELS {
+        let mut nw = TIKTOK_WIDTH;
+        let mut nh = (f64::from(h) * f64::from(nw) / f64::from(w)).round() as u32;
+        // Very tall images: fit by area instead.
+        if u64::from(nw) * u64::from(nh) > TIKTOK_MAX_PIXELS {
+            let s = (TIKTOK_MAX_PIXELS as f64 / (f64::from(w) * f64::from(h))).sqrt();
+            nw = (f64::from(w) * s).floor() as u32;
+            nh = (f64::from(h) * s).floor() as u32;
+        }
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92).encode(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(out)
+}
+
 pub fn slug(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
@@ -725,6 +758,16 @@ pub fn slug(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiktok_copy_fits_the_pixel_limit() {
+        let path = std::env::temp_dir().join("openugc-tiktok-test.jpg");
+        image::RgbImage::from_pixel(W, H, image::Rgb([200, 100, 50])).save(&path).unwrap();
+        let out = image::load_from_memory(&tiktok_jpeg(&path).unwrap()).unwrap();
+        assert_eq!((out.width(), out.height()), (1080, 1350));
+        assert!(u64::from(out.width()) * u64::from(out.height()) <= TIKTOK_MAX_PIXELS);
+        let _ = std::fs::remove_file(path);
+    }
 
     /// Renders a slideshow from the sample apps prepared in the app's data folder:
     /// `cargo test render_sample -- --ignored --nocapture`

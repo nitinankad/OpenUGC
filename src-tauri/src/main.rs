@@ -129,7 +129,9 @@ async fn schedule_post(
             let folder = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("slides");
             let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("slide.jpg");
             let safe = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '-' }).collect::<String>();
-            image_urls.push(store.upload_file(&format!("openugc/{}/{}", safe(folder), safe(file)), path)?);
+            // TikTok caps photos at ~2 MP, so upload a 1080-wide copy of each slide.
+            let bytes = slides::tiktok_jpeg(path)?;
+            image_urls.push(store.upload_bytes(&format!("openugc/{}/tiktok-{}", safe(folder), safe(file)), bytes, "image/jpeg")?);
         }
         let text = caption::post_text(&caption);
         let post = buffer::create_post(
