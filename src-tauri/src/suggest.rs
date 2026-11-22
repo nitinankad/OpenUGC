@@ -44,15 +44,29 @@ pub struct SuggestResult {
     pub popular: usize,
 }
 
-pub fn suggest_apps(niche: &str, count: usize, exclude: &[String], filter: &GemFilter, writer: Writer) -> Result<SuggestResult> {
-    let niche = niche.trim();
+pub fn suggest_apps(
+    niche: &str,
+    hook: &str,
+    count: usize,
+    exclude: &[String],
+    filter: &GemFilter,
+    writer: Writer,
+) -> Result<SuggestResult> {
+    let (niche, hook) = (niche.trim(), hook.trim());
     // Ask for extra: some suggestions won't be on the store, and the mix is balanced afterwards.
     let ask = count + count / 2;
-    let mut prompt = if niche.is_empty() {
-        format!("Niche: any. Pick standout apps from a mix of different categories.\nNumber of apps: {ask}\n")
-    } else {
-        format!("Niche: {niche}\nNumber of apps: {ask}\n")
-    };
+    let mut prompt = String::new();
+    if !hook.is_empty() {
+        prompt.push_str(&format!(
+            "Slideshow headline: \"{hook}\". Every app must clearly fit this headline, so a viewer who read it nods at each slide.\n"
+        ));
+    }
+    if !niche.is_empty() {
+        prompt.push_str(&format!("Niche: {niche}\n"));
+    } else if hook.is_empty() {
+        prompt.push_str("Niche: any. Pick standout apps from a mix of different categories.\n");
+    }
+    prompt.push_str(&format!("Number of apps: {ask}\n"));
     if !exclude.is_empty() {
         prompt.push_str(&format!("Exclude: {}\n", exclude.join("; ")));
     }

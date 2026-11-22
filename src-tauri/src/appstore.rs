@@ -109,6 +109,77 @@ pub fn find_app(query: &str, country: &str) -> Result<Vec<AppInfo>> {
     Ok(apps)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkLookup {
+    /// In the order they were pasted.
+    pub apps: Vec<AppInfo>,
+    /// Pasted text that isn't an App Store link or id.
+    pub invalid: Vec<String>,
+    /// Ids Apple returned nothing for (removed, or not sold in that country).
+    pub not_found: Vec<String>,
+}
+
+/// The two-letter store country in a link like https://apps.apple.com/gb/app/...
+fn link_country(link: &str) -> Option<String> {
+    let rest = &link[link.find("apps.apple.com/")? + "apps.apple.com/".len()..];
+    let cc = rest.split('/').next()?;
+    (cc.len() == 2 && cc.chars().all(|c| c.is_ascii_alphabetic())).then(|| cc.to_ascii_lowercase())
+}
+
+/// Looks up any number of App Store links or ids pasted together (separated by spaces,
+/// commas or new lines). One request per store country.
+pub fn lookup_links(input: &str, filter: &GemFilter) -> Result<LinkLookup> {
+    let mut invalid = Vec::new();
+    let mut wanted: Vec<(String, String)> = Vec::new(); // (id, country)
+    for tok in input.split(|c: char| c.is_whitespace() || c == ',').map(str::trim).filter(|t| !t.is_empty()) {
+        match app_id(tok) {
+            Some(id) if !wanted.iter().any(|(w, _)| w == id) => {
+                wanted.push((id.to_string(), link_country(tok).unwrap_or_else(|| filter.country.clone())));
+            }
+            Some(_) => {}
+            None => invalid.push(tok.to_string()),
+        }
+    }
+
+    let client = client()?;
+    let mut found: HashMap<u64, AppInfo> = HashMap::new();
+    let mut countries: Vec<&str> = wanted.iter().map(|(_, c)| c.as_str()).collect();
+    countries.sort_unstable();
+    countries.dedup();
+    for country in countries {
+        let ids: Vec<&str> = wanted.iter().filter(|(_, c)| c == country).map(|(id, _)| id.as_str()).collect();
+        // Apple's lookup takes a comma-separated list; keep requests a sensible size.
+        for chunk in ids.chunks(100) {
+            let resp: SearchResponse = client
+                .get("https://itunes.apple.com/lookup")
+                .query(&[("id", chunk.join(",").as_str()), ("country", country), ("entity", "software")])
+                .send()
+                .context("App Store lookup request failed")?
+                .error_for_status()?
+                .json()
+                .context("Could not parse App Store response")?;
+            for a in resp.results {
+                found.insert(a.track_id, a);
+            }
+        }
+    }
+
+    let now = Utc::now();
+    let mut apps = Vec::new();
+    let mut not_found = Vec::new();
+    for (id, _) in &wanted {
+        match id.parse::<u64>().ok().and_then(|n| found.remove(&n)) {
+            Some(mut a) => {
+                a.gem_score = gem_score(&a, filter, now);
+                apps.push(a);
+            }
+            None => not_found.push(id.clone()),
+        }
+    }
+    Ok(LinkLookup { apps, invalid, not_found })
+}
+
 /// The numeric id from an App Store link (".../app/paper-pond/id1234567890?..."),
 /// "id1234567890", or a bare number. None for anything else, which is treated as a name.
 fn app_id(q: &str) -> Option<&str> {
@@ -134,6 +205,14 @@ mod tests {
         assert_eq!(app_id("Paper Pond: Origami Letters"), None);
         assert_eq!(app_id("idle game"), None);
         assert_eq!(app_id("2048"), None);
+    }
+
+    #[test]
+    fn reads_link_country() {
+        use super::link_country;
+        assert_eq!(link_country("https://apps.apple.com/gb/app/paper-pond/id6824844571"), Some("gb".into()));
+        assert_eq!(link_country("https://apps.apple.com/app/id6824844571"), None);
+        assert_eq!(link_country("6824844571"), None);
     }
 }
 

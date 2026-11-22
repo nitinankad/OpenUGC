@@ -100,6 +100,10 @@ button, input, textarea { font: inherit; color: inherit; }
   min-height: 0;
 }
 .view { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+/* Find scrolls as one page (the header grew too tall for only the list to scroll); column titles stick. */
+#view-find { overflow-y: auto; }
+#view-find .results { overflow: visible; flex: none; }
+#view-find .results-head { position: sticky; top: 0; z-index: 1; background: var(--paper); padding-top: 8px; }
 
 /* ---------- Find ---------- */
 .find-head { padding: 30px 32px 18px; }
@@ -128,6 +132,11 @@ h1 {
 .btn-ask { background: var(--emerald-tint); color: var(--emerald-deep); white-space: nowrap; }
 .btn-ask:hover:not(:disabled) { background: color-mix(in srgb, var(--emerald-tint) 70%, var(--emerald) 30%); }
 .hook-suggest { margin-bottom: 10px; }
+.hook-start { margin: 0 0 20px; max-width: 720px; display: grid; gap: 10px; }
+.hook-start-head h2 { margin: 0; font-size: 16px; font-weight: 700; }
+.hook-now { margin: 2px 0 0; font-size: 14px; color: var(--slate); }
+.hook-now b { font-weight: 700; }
+.hook-ideas-wide { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); margin: 0; }
 .hook-ideas { list-style: none; margin: 0 0 14px; padding: 0; display: grid; gap: 6px; }
 .hook-ideas:empty { display: none; }
 .hook-ideas button {
@@ -139,6 +148,11 @@ h1 {
 .hook-ideas button:focus-visible { outline: 2px solid var(--emerald); }
 .hook-ideas button.is-on { border-color: var(--emerald); background: var(--emerald-tint); }
 .hook-ideas b { font-weight: 700; }
+.add-links { margin-top: 12px; max-width: 720px; }
+.add-links summary { cursor: pointer; font-size: 14px; font-weight: 600; color: var(--emerald-deep); width: fit-content; }
+.add-links summary:focus-visible { outline: 2px solid var(--emerald); border-radius: 4px; }
+.add-links[open] summary { margin-bottom: 4px; }
+.links-input { max-width: none; min-height: 3lh; max-height: 10lh; overflow-y: auto; font-size: 13.5px; margin: 6px 0 8px; display: block; }
 .search-hint { margin: 8px 0 0; font-size: 13px; color: var(--slate); max-width: 720px; }
 .results-note { margin: 0 32px 10px; font-size: 13.5px; color: var(--slate); }
 .search input::placeholder { color: var(--slate); opacity: .7; }

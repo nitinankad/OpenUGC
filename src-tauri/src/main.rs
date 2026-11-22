@@ -45,12 +45,18 @@ async fn search_gems(niche: String, filter: GemFilter) -> CmdResult<Vec<AppInfo>
 #[tauri::command]
 async fn suggest_apps(
     niche: String,
+    hook: String,
     count: usize,
     exclude: Vec<String>,
     filter: GemFilter,
     writer: Writer,
 ) -> CmdResult<suggest::SuggestResult> {
-    blocking(move || suggest::suggest_apps(&niche, count.clamp(4, 30), &exclude, &filter, writer)).await
+    blocking(move || suggest::suggest_apps(&niche, &hook, count.clamp(4, 30), &exclude, &filter, writer)).await
+}
+
+#[tauri::command]
+async fn lookup_links(links: String, filter: GemFilter) -> CmdResult<appstore::LinkLookup> {
+    blocking(move || appstore::lookup_links(&links, &filter)).await
 }
 
 #[tauri::command]
@@ -201,6 +207,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             search_gems,
             find_app,
+            lookup_links,
             suggest_apps,
             prepare_app,
             rewrite_overview,

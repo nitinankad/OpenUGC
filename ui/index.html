@@ -49,13 +49,30 @@
       <section class="view" id="view-find" hidden>
         <header class="find-head">
           <h1>Find hidden gems</h1>
+          <section class="hook-start" aria-labelledby="hook-start-title">
+            <div class="hook-start-head">
+              <h2 id="hook-start-title">Start with a hook</h2>
+              <p class="hook-now" id="find-hook-text"></p>
+            </div>
+            <div class="inline">
+              <button type="button" class="btn btn-ask btn-sm" data-hook-suggest>Suggest hooks</button>
+              <button type="button" class="btn btn-quiet" data-hook-clear hidden>Clear ideas</button>
+            </div>
+            <ul class="hook-ideas hook-ideas-wide"></ul>
+          </section>
           <form class="search" id="search-form" autocomplete="off">
             <input id="niche" type="text" spellcheck="false" autofocus
                    placeholder="habit tracker, journaling, focus timer" aria-label="Niche" />
             <button type="submit" class="btn btn-primary" id="search-btn">Search</button>
             <button type="button" class="btn btn-ask" id="suggest-btn">Ask Claude</button>
           </form>
-          <p class="search-hint">Search ranks the App Store by gem score. Ask has Claude or Codex suggest apps, for the niche or from anywhere if the box is empty, then looks each one up on the App Store. It skips apps already used in this account's posts.</p>
+          <p class="search-hint">Search ranks the App Store by gem score. Ask has Claude or Codex suggest apps that fit this post's hook (and the niche, if you type one), then looks each one up on the App Store. It skips apps already used in this account's posts.</p>
+          <details class="add-links" id="add-links-panel">
+            <summary>Add apps by App Store link</summary>
+            <p class="search-hint">Paste one link or many, one per line. They go straight into this post (up to six apps) and show in the list below.</p>
+            <textarea class="overview links-input" id="links-input" rows="3" spellcheck="false" placeholder="https://apps.apple.com/us/app/…/id123456789"></textarea>
+            <button type="button" class="btn btn-quiet" id="add-links">Add apps</button>
+          </details>
           <div class="filters" id="filters">
             <label>Country <input data-f="country" type="text" maxlength="2" class="w-xs" /></label>
             <label>Rating at least <input data-f="minRating" type="number" step="0.1" min="3" max="5" class="w-sm" /></label>
@@ -98,10 +115,10 @@
             <fieldset>
               <legend>Hook slide</legend>
               <div class="inline hook-suggest">
-                <button type="button" class="btn btn-ask btn-sm" id="suggest-hooks">Suggest hooks</button>
-                <button type="button" class="btn btn-quiet" id="clear-hooks" hidden>Clear ideas</button>
+                <button type="button" class="btn btn-ask btn-sm" data-hook-suggest>Suggest hooks</button>
+                <button type="button" class="btn btn-quiet" data-hook-clear hidden>Clear ideas</button>
               </div>
-              <ul class="hook-ideas" id="hook-ideas"></ul>
+              <ul class="hook-ideas"></ul>
               <label class="field">Highlighted line <input type="text" data-o="hookAccent" /></label>
               <label class="field">Second line <input type="text" data-o="hookLine2" /></label>
               <label class="field">Third line <input type="text" data-o="hookLine3" /></label>

@@ -150,7 +150,10 @@ function setView(view) {
   if (view === "board") renderBoard();
   if (view === "slides") renderSlides();
   if (view === "settings") renderSettings();
-  if (view === "find") $("#niche").value = post()?.niche || "";
+  if (view === "find") {
+    $("#niche").value = post()?.niche || "";
+    renderHookIdeas();
+  }
 }
 
 function renderRail() {
@@ -476,6 +479,7 @@ async function suggest() {
   try {
     const out = await invoke("suggest_apps", {
       niche,
+      hook: p ? hookText(p.slideOptions) : "",
       count: 12,
       exclude: usedByAccount(),
       filter: state.filter,
@@ -494,6 +498,48 @@ async function suggest() {
     ui.searching = false;
     renderResults();
     save();
+  }
+}
+
+/** Adds apps from pasted App Store links: into this post up to its limit, and all into the list below. */
+async function addByLinks() {
+  const p = post();
+  const links = $("#links-input").value.trim();
+  if (!p || !links || ui.addingLinks) return;
+  ui.addingLinks = true;
+  $("#add-links").disabled = true;
+  $("#add-links").textContent = "Looking up";
+  try {
+    const out = await invoke("lookup_links", { links, filter: state.filter });
+    const added = [];
+    const skipped = [];
+    for (const app of out.apps) {
+      if (isMine(app.trackId) || isPicked(app.trackId)) continue;
+      if (p.picked.length < gemCapacity()) {
+        p.picked.push(app);
+        added.push(app.trackName);
+      } else skipped.push(app.trackName);
+    }
+    if (out.apps.length) {
+      state.results = out.apps;
+      state.resultsNote = `From your links: ${out.apps.length} app${out.apps.length === 1 ? "" : "s"}.`;
+    }
+    const parts = [];
+    if (added.length) parts.push(`Added ${added.length} app${added.length === 1 ? "" : "s"} to this post`);
+    if (skipped.length) parts.push(`${skipped.length} didn't fit (six apps max), so they're in the list to swap in`);
+    if (out.notFound.length) parts.push(`not found on the App Store: ${out.notFound.join(", ")}`);
+    if (out.invalid.length) parts.push(`not App Store links: ${out.invalid.slice(0, 3).join(", ")}${out.invalid.length > 3 ? "…" : ""}`);
+    const bad = !out.apps.length;
+    toast(parts.length ? parts.join(". ") + "." : "Those apps are already in this post.", bad);
+    if (out.apps.length) $("#links-input").value = "";
+    renderAll();
+    save();
+  } catch (e) {
+    toast(`Couldn't look up those links: ${e}`, true);
+  } finally {
+    ui.addingLinks = false;
+    $("#add-links").disabled = false;
+    $("#add-links").textContent = "Add apps";
   }
 }
 
@@ -694,21 +740,30 @@ function renderSlides() {
 const hookText = (o) => [o.hookAccent, o.hookLine2, o.hookLine3].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
 const ideaText = (h) => [h.accent, h.line2, h.line3].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
 
+/** Hook ideas appear in Find apps (to start a post from a hook) and in Slides; both stay in sync. */
 function renderHookIdeas() {
   const p = post();
-  const btn = $("#suggest-hooks");
+  const o = opts();
   const writer = WRITER_NAMES[state.writer];
-  btn.disabled = !p || ui.hooking;
-  btn.textContent = ui.hooking ? `${writer} is writing hooks` : p?.hookIdeas?.length ? "More hook ideas" : `Suggest hooks with ${writer}`;
-  $("#clear-hooks").hidden = !p?.hookIdeas?.length || ui.hooking;
-  const current = hookText(opts()).toLowerCase();
-  $("#hook-ideas").innerHTML = (p?.hookIdeas || [])
+  const has = !!p?.hookIdeas?.length;
+  document.querySelectorAll("[data-hook-suggest]").forEach((btn) => {
+    btn.disabled = !p || ui.hooking;
+    btn.textContent = ui.hooking ? `${writer} is writing hooks` : has ? "More hook ideas" : `Suggest hooks with ${writer}`;
+  });
+  document.querySelectorAll("[data-hook-clear]").forEach((b) => (b.hidden = !has || ui.hooking));
+  const current = hookText(o).toLowerCase();
+  const html = (p?.hookIdeas || [])
     .map((h, i) => {
       const on = ideaText(h).toLowerCase() === current;
       const rest = [h.line2, h.line3].filter(Boolean).map(esc).join(" ");
-      return `<li><button type="button" data-hook="${i}" class="${on ? "is-on" : ""}"><b style="color:${esc(opts().accent)}">${esc(h.accent)}</b> ${rest}</button></li>`;
+      return `<li><button type="button" data-hook="${i}" class="${on ? "is-on" : ""}"><b style="color:${esc(o.accent)}">${esc(h.accent)}</b> ${rest}</button></li>`;
     })
     .join("");
+  document.querySelectorAll(".hook-ideas").forEach((ul) => (ul.innerHTML = html));
+  const rest = [o.hookLine2, o.hookLine3].filter(Boolean).map(esc).join(" ");
+  $("#find-hook-text").innerHTML = p
+    ? `This post's hook: <b style="color:${esc(o.accent)}">${esc(o.hookAccent)}</b> ${rest}. Pick a new one, then Ask ${esc(writer)} for apps that fit it.`
+    : "";
 }
 
 /** Hooks this account has already used, so new ones take a different angle. */
@@ -731,7 +786,7 @@ async function suggestHooks() {
       niche: p.niche || "",
       ownApp: accountOf(p)?.myApp || null,
       apps: slideApps(),
-      count: lineupFor(p).length || MAX_APPS,
+      count: MAX_APPS,
       used: usedHooks(p),
       writer: state.writer,
     });
@@ -824,10 +879,10 @@ function bindSlides() {
     save();
   });
   $("#slide-settings").addEventListener("submit", (e) => e.preventDefault());
-  $("#suggest-hooks").addEventListener("click", suggestHooks);
-  $("#clear-hooks").addEventListener("click", clearHooks);
-  $("#hook-ideas").addEventListener("click", (e) => {
-    const b = e.target.closest("[data-hook]");
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("[data-hook-suggest]")) return suggestHooks();
+    if (e.target.closest("[data-hook-clear]")) return clearHooks();
+    const b = e.target.closest(".hook-ideas [data-hook]");
     if (b) useHook(Number(b.dataset.hook));
   });
   $("#make-slides").addEventListener("click", makeSlides);
@@ -1306,6 +1361,7 @@ function bind() {
     search();
   });
   $("#suggest-btn").addEventListener("click", suggest);
+  $("#add-links").addEventListener("click", addByLinks);
   document.querySelectorAll("[data-f]").forEach((input) => {
     const key = input.dataset.f;
     input.value = state.filter[key];
