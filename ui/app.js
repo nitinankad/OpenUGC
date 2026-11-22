@@ -29,6 +29,8 @@ const state = {
   /** Latest search results, shared by all posts. */
   results: [],
   resultsNiche: "",
+  /** Shown above the results, e.g. which suggestions weren't on the App Store. */
+  resultsNote: "",
   prepared: [],
   /** { id, username, channelId, channelName, myApp, myAppSlot, createdAt } */
   accounts: [],
@@ -39,7 +41,10 @@ const state = {
 const ui = {
   view: "board",
   searching: false,
+  /** "search" or "suggest" while one is running. */
+  searchKind: "search",
   rendering: false,
+  hooking: false,
   busy: new Set(),
   justAdded: null,
   mine: { editing: false, searching: false, results: [] },
@@ -377,11 +382,19 @@ function renderResults() {
   const hasResults = state.results.length > 0;
   $("#results-head").hidden = !hasResults;
   $("#find-empty").hidden = hasResults || ui.searching;
+  const writer = WRITER_NAMES[state.writer];
+  const suggesting = ui.searching && ui.searchKind === "suggest";
   $("#search-btn").disabled = ui.searching;
-  $("#search-btn").textContent = ui.searching ? "Searching" : "Search";
+  $("#search-btn").textContent = ui.searching && !suggesting ? "Searching" : "Search";
+  $("#suggest-btn").disabled = ui.searching;
+  $("#suggest-btn").textContent = suggesting ? `Asking ${writer}` : `Ask ${writer}`;
+  $("#results-note").hidden = ui.searching || !state.resultsNote || !hasResults;
+  $("#results-note").textContent = state.resultsNote;
 
   if (ui.searching) {
-    list.innerHTML = `<li class="loading-row"><span class="spinner"></span>Searching the App Store for "${esc(state.resultsNiche)}"</li>`;
+    list.innerHTML = suggesting
+      ? `<li class="loading-row"><span class="spinner"></span>${esc(writer)} is picking apps${state.resultsNiche ? ` for "${esc(state.resultsNiche)}"` : ""}, then each one is looked up on the App Store</li>`
+      : `<li class="loading-row"><span class="spinner"></span>Searching the App Store for "${esc(state.resultsNiche)}"</li>`;
     return;
   }
   const full = picked().length >= gemCapacity();
@@ -425,13 +438,58 @@ async function search() {
   const p = post();
   if (p) p.niche = niche;
   state.resultsNiche = niche;
+  state.resultsNote = "";
   ui.searching = true;
+  ui.searchKind = "search";
   renderResults();
   try {
     state.results = await invoke("search_gems", { niche, filter: state.filter });
     if (!state.results.length) toast("No apps matched. Try a broader niche or loosen the filters.");
   } catch (e) {
     toast(`Search failed: ${e}`, true);
+  } finally {
+    ui.searching = false;
+    renderResults();
+    save();
+  }
+}
+
+/** Apps the current account has already used, so suggestions bring new ones. */
+function usedByAccount() {
+  const a = acct();
+  const names = new Set();
+  if (a?.myApp) names.add(a.myApp.trackName);
+  for (const p of a ? postsOf(a) : []) for (const app of p.picked) names.add(app.trackName);
+  return [...names];
+}
+
+async function suggest() {
+  const niche = $("#niche").value.trim();
+  if (ui.searching) return;
+  const p = post();
+  if (p && niche) p.niche = niche;
+  state.resultsNiche = niche;
+  ui.searching = true;
+  ui.searchKind = "suggest";
+  const writer = WRITER_NAMES[state.writer];
+  renderResults();
+  try {
+    const out = await invoke("suggest_apps", {
+      niche,
+      count: 12,
+      exclude: usedByAccount(),
+      filter: state.filter,
+      writer: state.writer,
+    });
+    state.results = out.apps;
+    const total = out.suggested;
+    const mix = `Showing ${out.gems} hidden gem${out.gems === 1 ? "" : "s"} (up to ${fmtCount(state.filter.maxRatings)} ratings) first, then ${out.popular} popular app${out.popular === 1 ? "" : "s"}.`;
+    const missing = out.notFound.length ? ` Not on the App Store: ${out.notFound.join(", ")}.` : "";
+    const unrated = out.unrated.length ? ` Left out with no ratings yet: ${out.unrated.join(", ")}.` : "";
+    state.resultsNote = `${writer} suggested ${total} apps. ${mix}${missing}${unrated}`;
+    if (!out.apps.length) toast(`None of ${writer}'s suggestions were found on the App Store. Try again or reword the niche.`, true);
+  } catch (e) {
+    toast(`Couldn't get suggestions: ${e}`, true);
   } finally {
     ui.searching = false;
     renderResults();
@@ -628,7 +686,86 @@ function renderSlides() {
         })
         .join("")
     : "";
+  renderHookIdeas();
   renderPost();
+}
+
+/* ---------- Hook ideas ---------- */
+const hookText = (o) => [o.hookAccent, o.hookLine2, o.hookLine3].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
+const ideaText = (h) => [h.accent, h.line2, h.line3].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
+
+function renderHookIdeas() {
+  const p = post();
+  const btn = $("#suggest-hooks");
+  const writer = WRITER_NAMES[state.writer];
+  btn.disabled = !p || ui.hooking;
+  btn.textContent = ui.hooking ? `${writer} is writing hooks` : p?.hookIdeas?.length ? "More hook ideas" : `Suggest hooks with ${writer}`;
+  $("#clear-hooks").hidden = !p?.hookIdeas?.length || ui.hooking;
+  const current = hookText(opts()).toLowerCase();
+  $("#hook-ideas").innerHTML = (p?.hookIdeas || [])
+    .map((h, i) => {
+      const on = ideaText(h).toLowerCase() === current;
+      const rest = [h.line2, h.line3].filter(Boolean).map(esc).join(" ");
+      return `<li><button type="button" data-hook="${i}" class="${on ? "is-on" : ""}"><b style="color:${esc(opts().accent)}">${esc(h.accent)}</b> ${rest}</button></li>`;
+    })
+    .join("");
+}
+
+/** Hooks this account has already used, so new ones take a different angle. */
+function usedHooks(p) {
+  const a = accountOf(p);
+  const used = new Set();
+  for (const q of a ? postsOf(a) : []) if (q.id !== p.id && q.slides) used.add(hookText(q.slideOptions));
+  for (const h of p.hookIdeas || []) used.add(ideaText(h));
+  for (const t of p.seenHooks || []) used.add(t);
+  return [...used].filter(Boolean);
+}
+
+async function suggestHooks() {
+  const p = post();
+  if (!p || ui.hooking) return;
+  ui.hooking = true;
+  renderHookIdeas();
+  try {
+    const ideas = await invoke("suggest_hooks", {
+      niche: p.niche || "",
+      ownApp: accountOf(p)?.myApp || null,
+      apps: slideApps(),
+      count: lineupFor(p).length || MAX_APPS,
+      used: usedHooks(p),
+      writer: state.writer,
+    });
+    // Newest ideas on top; keep a short history so earlier favourites stay clickable.
+    p.hookIdeas = [...ideas, ...(p.hookIdeas || [])].slice(0, 24);
+    save();
+  } catch (e) {
+    toast(`Couldn't write hooks: ${e}`, true);
+  } finally {
+    ui.hooking = false;
+    renderHookIdeas();
+  }
+}
+
+/** Clears the idea list. The hook text in the fields stays; cleared ideas are remembered so they aren't suggested again. */
+function clearHooks() {
+  const p = post();
+  if (!p?.hookIdeas?.length) return;
+  p.seenHooks = [...new Set([...(p.seenHooks || []), ...p.hookIdeas.map(ideaText)])].slice(-60);
+  p.hookIdeas = [];
+  renderHookIdeas();
+  save();
+}
+
+function useHook(i) {
+  const p = post();
+  const h = p?.hookIdeas?.[i];
+  if (!h) return;
+  Object.assign(p.slideOptions, { hookAccent: h.accent, hookLine2: h.line2 || "", hookLine3: h.line3 || "" });
+  renderSlideSettings();
+  renderTray();
+  renderHookIdeas();
+  renderPost();
+  save();
 }
 
 async function makeSlides() {
@@ -655,6 +792,7 @@ function setOption(key, value) {
   if (!p) return;
   p.slideOptions[key] = value;
   renderTray();
+  if (key.startsWith("hook")) renderHookIdeas();
   save();
 }
 
@@ -686,6 +824,12 @@ function bindSlides() {
     save();
   });
   $("#slide-settings").addEventListener("submit", (e) => e.preventDefault());
+  $("#suggest-hooks").addEventListener("click", suggestHooks);
+  $("#clear-hooks").addEventListener("click", clearHooks);
+  $("#hook-ideas").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-hook]");
+    if (b) useHook(Number(b.dataset.hook));
+  });
   $("#make-slides").addEventListener("click", makeSlides);
   $("#show-folder").addEventListener("click", () => {
     const first = post()?.slides?.slides?.[0];
@@ -1161,6 +1305,7 @@ function bind() {
     e.preventDefault();
     search();
   });
+  $("#suggest-btn").addEventListener("click", suggest);
   document.querySelectorAll("[data-f]").forEach((input) => {
     const key = input.dataset.f;
     input.value = state.filter[key];
@@ -1182,6 +1327,8 @@ function bind() {
     b.addEventListener("click", () => {
       state.writer = b.dataset.writer;
       renderWriter();
+      renderResults();
+      renderHookIdeas();
       save();
     }),
   );

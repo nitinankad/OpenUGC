@@ -175,13 +175,25 @@ fn hook_slide(f: &Fonts, pal: &Palette, o: &SlideOptions, icons: &[Option<Pixmap
     drop_shadow(&mut pm, &quad, (46.0, 34.0), 0.42);
     warp_onto(&mut pm, &phone, &quad);
 
+    // Shrink all three lines together until the widest fits, keeping the top edge in place.
     let x = 216.0;
-    let size = 190.0;
-    draw_text(&mut pm, &f.bold, &o.hook_accent, size, -0.035, x, 405.0, pal.accent);
-    draw_text(&mut pm, &f.regular, &o.hook_line2, size, -0.035, x, 614.0, pal.ink);
-    draw_text(&mut pm, &f.regular, &o.hook_line3, size, -0.035, x, 823.0, pal.ink);
+    let max_w = W as f32 - 2.0 * x;
+    let mut size: f32 = 190.0;
+    let widest = |s: f32| {
+        text_width(&f.bold, &o.hook_accent, s, -0.035)
+            .max(text_width(&f.regular, &o.hook_line2, s, -0.035))
+            .max(text_width(&f.regular, &o.hook_line3, s, -0.035))
+    };
+    while widest(size) > max_w && size > 110.0 {
+        size -= 4.0;
+    }
+    let top = 405.0 - 0.73 * 190.0;
+    let (b1, gap) = (top + 0.73 * size, 1.1 * size);
+    draw_text(&mut pm, &f.bold, &o.hook_accent, size, -0.035, x, b1, pal.accent);
+    draw_text(&mut pm, &f.regular, &o.hook_line2, size, -0.035, x, b1 + gap, pal.ink);
+    draw_text(&mut pm, &f.regular, &o.hook_line3, size, -0.035, x, b1 + 2.0 * gap, pal.ink);
     if o.part > 0 {
-        draw_text(&mut pm, &f.regular, &format!("(part {})", o.part), 128.0, -0.03, x, 1188.0, pal.ink);
+        draw_text(&mut pm, &f.regular, &format!("(part {})", o.part), 128.0, -0.03, x, b1 + 2.0 * gap + 365.0, pal.ink);
     }
     pm
 }

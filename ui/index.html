@@ -53,7 +53,9 @@
             <input id="niche" type="text" spellcheck="false" autofocus
                    placeholder="habit tracker, journaling, focus timer" aria-label="Niche" />
             <button type="submit" class="btn btn-primary" id="search-btn">Search</button>
+            <button type="button" class="btn btn-ask" id="suggest-btn">Ask Claude</button>
           </form>
+          <p class="search-hint">Search ranks the App Store by gem score. Ask has Claude or Codex suggest apps, for the niche or from anywhere if the box is empty, then looks each one up on the App Store. It skips apps already used in this account's posts.</p>
           <div class="filters" id="filters">
             <label>Country <input data-f="country" type="text" maxlength="2" class="w-xs" /></label>
             <label>Rating at least <input data-f="minRating" type="number" step="0.1" min="3" max="5" class="w-sm" /></label>
@@ -62,6 +64,7 @@
           </div>
         </header>
 
+        <p class="results-note" id="results-note" hidden></p>
         <div class="results-head" id="results-head" hidden>
           <span>App</span><span>Rating</span><span>Category</span><span>Last update</span><span>Gem score</span><span></span>
         </div>
@@ -94,6 +97,11 @@
           <form class="settings" id="slide-settings" autocomplete="off">
             <fieldset>
               <legend>Hook slide</legend>
+              <div class="inline hook-suggest">
+                <button type="button" class="btn btn-ask btn-sm" id="suggest-hooks">Suggest hooks</button>
+                <button type="button" class="btn btn-quiet" id="clear-hooks" hidden>Clear ideas</button>
+              </div>
+              <ul class="hook-ideas" id="hook-ideas"></ul>
               <label class="field">Highlighted line <input type="text" data-o="hookAccent" /></label>
               <label class="field">Second line <input type="text" data-o="hookLine2" /></label>
               <label class="field">Third line <input type="text" data-o="hookLine3" /></label>

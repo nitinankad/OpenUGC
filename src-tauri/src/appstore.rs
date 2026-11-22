@@ -65,14 +65,14 @@ struct SearchResponse {
     results: Vec<AppInfo>,
 }
 
-fn client() -> Result<reqwest::blocking::Client> {
+pub(crate) fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .user_agent("OpenUGC/0.1")
         .timeout(std::time::Duration::from_secs(30))
         .build()?)
 }
 
-fn search_term(client: &reqwest::blocking::Client, term: &str, country: &str) -> Result<Vec<AppInfo>> {
+pub(crate) fn search_term(client: &reqwest::blocking::Client, term: &str, country: &str) -> Result<Vec<AppInfo>> {
     let resp: SearchResponse = client
         .get("https://itunes.apple.com/search")
         .query(&[
@@ -167,7 +167,7 @@ pub fn find_hidden_gems(niche: &str, filter: &GemFilter) -> Result<Vec<AppInfo>>
 }
 
 /// 0..100. Rewards high ratings, obscurity (few ratings), and recent updates.
-fn gem_score(a: &AppInfo, f: &GemFilter, now: DateTime<Utc>) -> f64 {
+pub(crate) fn gem_score(a: &AppInfo, f: &GemFilter, now: DateTime<Utc>) -> f64 {
     let quality =
         ((a.average_user_rating - f.min_rating) / (5.0 - f.min_rating).max(0.01)).clamp(0.0, 1.0);
     // Need *some* ratings to trust the average: confidence ramps up to ~200 ratings.

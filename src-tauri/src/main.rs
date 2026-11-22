@@ -4,10 +4,12 @@
 mod appstore;
 mod buffer;
 mod caption;
+mod hooks;
 mod prepare;
 mod r2;
 mod settings;
 mod slides;
+mod suggest;
 
 use appstore::{AppInfo, GemFilter};
 use caption::Caption;
@@ -41,6 +43,17 @@ async fn search_gems(niche: String, filter: GemFilter) -> CmdResult<Vec<AppInfo>
 }
 
 #[tauri::command]
+async fn suggest_apps(
+    niche: String,
+    count: usize,
+    exclude: Vec<String>,
+    filter: GemFilter,
+    writer: Writer,
+) -> CmdResult<suggest::SuggestResult> {
+    blocking(move || suggest::suggest_apps(&niche, count.clamp(4, 30), &exclude, &filter, writer)).await
+}
+
+#[tauri::command]
 async fn find_app(query: String, country: String) -> CmdResult<Vec<AppInfo>> {
     blocking(move || appstore::find_app(&query, &country)).await
 }
@@ -66,6 +79,22 @@ async fn render_slides(app: AppHandle, apps: Vec<PreparedApp>, options: SlideOpt
 #[tauri::command]
 async fn generate_caption(niche: String, apps: Vec<PreparedApp>, writer: Writer) -> CmdResult<Caption> {
     blocking(move || caption::generate_caption(&niche, &apps, writer)).await
+}
+
+#[tauri::command]
+async fn suggest_hooks(
+    niche: String,
+    own_app: Option<AppInfo>,
+    apps: Vec<PreparedApp>,
+    count: usize,
+    used: Vec<String>,
+    writer: Writer,
+) -> CmdResult<Vec<hooks::Hook>> {
+    blocking(move || {
+        let brief = hooks::HookBrief { niche: &niche, own_app: own_app.as_ref(), apps: &apps, count, used: &used, how_many: 8 };
+        hooks::suggest_hooks(&brief, writer)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -172,10 +201,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             search_gems,
             find_app,
+            suggest_apps,
             prepare_app,
             rewrite_overview,
             render_slides,
             generate_caption,
+            suggest_hooks,
             get_settings,
             save_settings,
             export_settings,
