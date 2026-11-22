@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenUGC</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <nav class="rail" aria-label="Sections">
+      <div class="brand">OpenUGC</div>
+      <button class="nav-item is-active" data-view="find">Find apps</button>
+      <button class="nav-item" data-view="prepare">Prepared <span class="nav-count" id="nav-prepared"></span></button>
+      <button class="nav-item" data-view="slides">Slides</button>
+    </nav>
+
+    <main class="stage">
+      <!-- Find -->
+      <section class="view" id="view-find">
+        <header class="find-head">
+          <h1>Find hidden gems</h1>
+          <form class="search" id="search-form" autocomplete="off">
+            <input id="niche" type="text" spellcheck="false" autofocus
+                   placeholder="habit tracker, journaling, focus timer" aria-label="Niche" />
+            <button type="submit" class="btn btn-primary" id="search-btn">Search</button>
+          </form>
+          <div class="filters" id="filters">
+            <label>Country <input data-f="country" type="text" maxlength="2" class="w-xs" /></label>
+            <label>Rating at least <input data-f="minRating" type="number" step="0.1" min="3" max="5" class="w-sm" /></label>
+            <label>Between <input data-f="minRatings" type="number" min="0" class="w-md" /> and <input data-f="maxRatings" type="number" min="0" class="w-md" /> ratings</label>
+            <label>Updated in the last <input data-f="maxDaysSinceUpdate" type="number" min="0" class="w-sm" /> days</label>
+          </div>
+        </header>
+
+        <div class="results-head" id="results-head" hidden>
+          <span>App</span><span>Rating</span><span>Category</span><span>Last update</span><span>Gem score</span><span></span>
+        </div>
+        <ol class="results" id="results"></ol>
+        <div class="empty" id="find-empty">
+          <p class="empty-title">Search a niche to start.</p>
+          <p>You'll get apps with great ratings that few people have found yet, ranked by gem score. Separate terms with commas to search more widely.</p>
+        </div>
+      </section>
+
+      <!-- Prepared -->
+      <section class="view" id="view-prepare" hidden>
+        <header class="find-head">
+          <h1>Prepared apps</h1>
+          <p class="lede">Screenshots and icons are downloaded, and Claude or Codex writes an overview for each app. Edit any overview before it goes on a slide. Aim for one sentence of about 100 to 140 characters.</p>
+        </header>
+        <div class="prepared" id="prepared"></div>
+        <div class="empty" id="prepare-empty">
+          <p class="empty-title">Nothing prepared yet.</p>
+          <p>Add up to six apps in Find apps, then press Prepare in the preview.</p>
+        </div>
+      </section>
+      <!-- Slides -->
+      <section class="view" id="view-slides" hidden>
+        <header class="find-head">
+          <h1>Slides</h1>
+          <p class="lede" id="slides-lede"></p>
+        </header>
+        <div class="slides-layout">
+          <form class="settings" id="slide-settings" autocomplete="off">
+            <fieldset>
+              <legend>Hook slide</legend>
+              <label class="field">Highlighted line <input type="text" data-o="hookAccent" /></label>
+              <label class="field">Second line <input type="text" data-o="hookLine2" /></label>
+              <label class="field">Third line <input type="text" data-o="hookLine3" /></label>
+              <label class="field">Part number (0 hides it) <input type="number" min="0" data-o="part" class="w-sm" /></label>
+            </fieldset>
+            <fieldset>
+              <legend>Last slide</legend>
+              <label class="field">Highlighted line <input type="text" data-o="ctaAccent" /></label>
+              <label class="field">Second line <input type="text" data-o="ctaLine2" /></label>
+              <label class="field">Third line <input type="text" data-o="ctaLine3" /></label>
+            </fieldset>
+            <fieldset>
+              <legend>Colours</legend>
+              <div class="color-row"><input type="color" data-color="accent" aria-label="Highlight colour" /><input type="text" data-hex="accent" maxlength="7" /><span>Highlight</span></div>
+              <div class="color-row"><input type="color" data-color="text" aria-label="Text colour" /><input type="text" data-hex="text" maxlength="7" /><span>Text</span></div>
+              <div class="color-row"><input type="color" data-color="background" aria-label="Background colour" /><input type="text" data-hex="background" maxlength="7" /><span>Background</span></div>
+              <div class="color-row"><input type="color" data-color="wallpaper" aria-label="Phone wallpaper colour" /><input type="text" data-hex="wallpaper" maxlength="7" /><span>Phone wallpaper</span></div>
+              <button type="button" class="btn btn-quiet" id="reset-colors">Reset colours</button>
+            </fieldset>
+          </form>
+          <div class="slides-output">
+            <div class="slides-actions">
+              <button class="btn btn-primary" id="make-slides">Make slides</button>
+              <button class="btn btn-quiet" id="show-folder" hidden>Show in folder</button>
+            </div>
+            <ol class="thumbs" id="thumbs"></ol>
+            <div class="empty" id="slides-empty">
+              <p class="empty-title">No slides yet.</p>
+              <p>Pick your text and colours, then press Make slides. You'll get 2160 × 2700 JPEGs: the hook, one slide per app, and the last slide.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="tray" aria-label="Hook slide preview">
+      <div class="phone">
+        <div class="island"></div>
+        <div class="screen">
+          <p class="hook">hidden gems on the app store you need to know</p>
+          <ul class="home-grid" id="home-grid"></ul>
+        </div>
+      </div>
+      <p class="tray-status" id="tray-status"></p>
+      <section class="mine" id="mine" aria-labelledby="mine-title">
+        <h2 class="mine-title" id="mine-title">Your app</h2>
+        <div id="mine-set" hidden>
+          <div class="mine-app">
+            <img class="icon" id="mine-icon" alt="" />
+            <div class="ident-text">
+              <span class="name" id="mine-name"></span>
+              <span class="sub" id="mine-artist"></span>
+            </div>
+          </div>
+          <div class="mine-controls">
+            <label class="mine-pos">Appears <select id="mine-slot"></select></label>
+            <button type="button" class="btn btn-quiet" id="mine-change">Change</button>
+          </div>
+        </div>
+        <form id="mine-form" autocomplete="off">
+          <p class="mine-hint">Goes into every slideshow alongside the gems.</p>
+          <div class="mine-search">
+            <input id="mine-query" type="text" spellcheck="false" placeholder="App Store link or name" aria-label="Your app's App Store link or name" />
+            <button type="submit" class="btn btn-quiet" id="mine-find">Find</button>
+          </div>
+          <ul class="mine-results" id="mine-results"></ul>
+          <button type="button" class="btn btn-quiet mine-cancel" id="mine-cancel" hidden>Keep current app</button>
+        </form>
+      </section>
+      <div class="writer" role="radiogroup" aria-label="Write overviews with">
+        <span class="writer-label">Overviews by</span>
+        <div class="segmented">
+          <button role="radio" data-writer="claude">Claude</button>
+          <button role="radio" data-writer="codex">Codex</button>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-wide" id="prepare-btn" disabled>Prepare apps</button>
+    </aside>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
