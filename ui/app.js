@@ -83,7 +83,9 @@ const acct = () => accountOf(post());
 const postsOf = (a) => state.posts.filter((p) => p.accountId === a.id).sort((x, y) => x.createdAt - y.createdAt);
 const picked = () => post()?.picked || [];
 const opts = () => post()?.slideOptions || DEFAULT_SLIDE_OPTIONS;
-const myApp = () => acct()?.myApp || null;
+/** The account's own app, unless this post leaves it out. */
+const ownAppOf = (p) => (p && !p.skipMine && accountOf(p)?.myApp) || null;
+const myApp = () => ownAppOf(post());
 const mySlot = () => acct()?.myAppSlot || 3;
 const isPicked = (id) => picked().some((a) => a.trackId === id);
 const preparedFor = (id) => state.prepared.find((p) => p.app.trackId === id);
@@ -94,9 +96,9 @@ const gemCapacity = () => MAX_APPS - (myApp() ? 1 : 0);
 /** Every app in a post, in slide order: the gems with the account's app at its chosen position. */
 function lineupFor(p) {
   if (!p) return [];
-  const a = accountOf(p);
+  const mine = ownAppOf(p);
   const apps = [...p.picked];
-  if (a?.myApp) apps.splice(Math.min((a.myAppSlot || 3) - 1, apps.length), 0, a.myApp);
+  if (mine) apps.splice(Math.min((accountOf(p).myAppSlot || 3) - 1, apps.length), 0, mine);
   return apps;
 }
 const lineup = () => lineupFor(post());
@@ -921,7 +923,7 @@ async function suggestHooks() {
   try {
     const ideas = await invoke("suggest_hooks", {
       niche: p.niche || "",
-      ownApp: accountOf(p)?.myApp || null,
+      ownApp: ownAppOf(p),
       apps: slideApps(),
       count: MAX_APPS,
       used: usedHooks(p),
@@ -1044,6 +1046,12 @@ function renderMine() {
   $("#mine-set").hidden = editing;
   $("#mine-form").hidden = !editing;
   $("#mine-cancel").hidden = !app;
+  $("#mine-remove").hidden = !app;
+  const off = !!post()?.skipMine;
+  $("#mine-app").classList.toggle("is-off", off);
+  $("#mine-pos").hidden = off;
+  $("#mine-off").hidden = !off;
+  $("#mine-skip").textContent = off ? "Add back to this post" : "Leave out of this post";
   $("#mine-find").disabled = m.searching;
   $("#mine-find").textContent = m.searching ? "Finding" : "Find";
 
@@ -1091,6 +1099,7 @@ function setMine(app) {
   if (!a || !p) return;
   a.myApp = app;
   a.myAppSlot = a.myAppSlot || 3;
+  delete p.skipMine;
   p.picked = p.picked.filter((x) => x.trackId !== app.trackId);
   const dropped = p.picked.splice(gemCapacity());
   ui.mine = { editing: false, searching: false, results: [] };
@@ -1121,6 +1130,33 @@ function bindMine() {
   $("#mine-cancel").addEventListener("click", () => {
     ui.mine = { editing: false, searching: false, results: [] };
     renderMine();
+  });
+  $("#mine-skip").addEventListener("click", () => {
+    const p = post();
+    const a = acct();
+    if (!p || !a?.myApp) return;
+    let dropped = [];
+    if (p.skipMine) {
+      delete p.skipMine;
+      // Back in: make room the same way picking a new app does.
+      p.picked = p.picked.filter((x) => x.trackId !== a.myApp.trackId);
+      dropped = p.picked.splice(gemCapacity());
+    } else {
+      p.skipMine = true;
+    }
+    renderAll();
+    save();
+    if (dropped.length) toast(`Removed ${dropped.map((d) => d.trackName).join(", ")} to make room for your app`);
+  });
+  $("#mine-remove").addEventListener("click", () => {
+    const a = acct();
+    if (!a) return;
+    a.myApp = null;
+    for (const p of postsOf(a)) delete p.skipMine;
+    ui.mine = { editing: false, searching: false, results: [] };
+    renderAll();
+    save();
+    toast(`${handle(a)} no longer promotes an app`);
   });
   $("#mine-slot").addEventListener("change", (e) => {
     const a = acct();
@@ -1500,8 +1536,8 @@ function linkFor(p, videoId, linkedBy) {
     postName: p.name,
     hook: hookText(p.slideOptions),
     apps: lineupFor(p).map((x) => x.trackName),
-    myApp: a?.myApp?.trackName || null,
-    myAppSlot: a?.myApp ? a.myAppSlot || 3 : null,
+    myApp: ownAppOf(p)?.trackName || null,
+    myAppSlot: ownAppOf(p) ? a.myAppSlot || 3 : null,
     linkedBy,
   };
 }

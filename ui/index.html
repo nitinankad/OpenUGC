@@ -301,7 +301,7 @@
       <section class="mine" id="mine" aria-labelledby="mine-title">
         <h2 class="mine-title" id="mine-title">Your app</h2>
         <div id="mine-set" hidden>
-          <div class="mine-app">
+          <div class="mine-app" id="mine-app">
             <img class="icon" id="mine-icon" alt="" />
             <div class="ident-text">
               <span class="name" id="mine-name"></span>
@@ -309,9 +309,11 @@
             </div>
           </div>
           <div class="mine-controls">
-            <label class="mine-pos">Appears <select id="mine-slot"></select></label>
+            <label class="mine-pos" id="mine-pos">Appears <select id="mine-slot"></select></label>
+            <span class="mine-off" id="mine-off" hidden>Not in this post</span>
             <button type="button" class="btn btn-quiet" id="mine-change">Change</button>
           </div>
+          <button type="button" class="btn btn-quiet mine-skip" id="mine-skip">Leave out of this post</button>
         </div>
         <form id="mine-form" autocomplete="off">
           <p class="mine-hint">Goes into every post for this account, alongside the gems.</p>
@@ -320,7 +322,10 @@
             <button type="submit" class="btn btn-quiet" id="mine-find">Find</button>
           </div>
           <ul class="mine-results" id="mine-results"></ul>
-          <button type="button" class="btn btn-quiet mine-cancel" id="mine-cancel" hidden>Keep current app</button>
+          <div class="mine-form-actions">
+            <button type="button" class="btn btn-quiet" id="mine-cancel" hidden>Keep current app</button>
+            <button type="button" class="btn btn-quiet" id="mine-remove" hidden>Don't promote an app</button>
+          </div>
         </form>
       </section>
       <div class="writer" role="radiogroup" aria-label="Write overviews with">

@@ -687,7 +687,11 @@ h1 {
 .mine-results .icon { width: 32px; height: 32px; flex: none; }
 .mine-results .name { font-size: 13px; font-weight: 600; }
 .mine-results .sub { font-size: 12px; }
-.mine-cancel { margin-top: 8px; }
+.mine-form-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.mine-form-actions:not(:has(:not([hidden]))) { display: none; }
+.mine-skip { width: 100%; margin-top: 8px; justify-content: center; }
+.mine-off { font-size: 13px; color: var(--slate); }
+.mine-app.is-off { opacity: 0.5; }
 .slot-badge {
   position: absolute; top: -5px; right: 2px;
   min-width: 16px; height: 16px; padding: 0 4px;
