@@ -17,6 +17,13 @@ const DEFAULT_SLIDE_OPTIONS = {
   ...DEFAULT_COLORS,
 };
 
+/** Slideshow formats. Each account picks one; each post keeps the format it was made with. */
+const FORMATS = { gems: "Hidden gem apps", drawn: "Relatable drawings" };
+const DEFAULT_DRAWN_STYLE = { background: "#faf9f6", text: "#111111", accent: "#e0201b" };
+const DEFAULT_POINTS = 6;
+/** Drawings made at once; each is a separate Codex or Claude run. */
+const DRAW_PARALLEL = 3;
+
 /*
  * Saved state. Accounts are TikTok usernames; each post belongs to one account and holds
  * everything for one slideshow. Prepared apps are a shared cache so a gem used in two posts
@@ -25,6 +32,8 @@ const DEFAULT_SLIDE_OPTIONS = {
 const state = {
   version: 2,
   writer: "claude",
+  /** Who draws for the relatable-drawings format: "codex" (image generation) or "claude" (SVG). */
+  artist: "codex",
   filter: { country: "us", minRating: 4.5, minRatings: 30, maxRatings: 5000, maxDaysSinceUpdate: 365 },
   /** Latest search results, shared by all posts. */
   results: [],
@@ -32,9 +41,14 @@ const state = {
   /** Shown above the results, e.g. which suggestions weren't on the App Store. */
   resultsNote: "",
   prepared: [],
-  /** { id, username, channelId, channelName, myApp, myAppSlot, createdAt } */
+  /** { id, username, format, myApp, myAppSlot, createdAt } */
   accounts: [],
-  /** { id, accountId, name, createdAt, niche, picked, slideOptions, slides, caption, buffer } */
+  /**
+   * { id, accountId, format, name, createdAt, niche, picked, slideOptions, slides, caption, phone, posted, drawn }
+   * phone (after Send to phone): { folder, url, sentAt, renderedAt, text } (renderedAt and text are what was sent)
+   * posted (marked by you): { at, link? }
+   * drawn (relatable drawings only): { topic, points, accent, slides: [{ id, text, scene, image }], plug, style }
+   */
   posts: [],
   currentPostId: null,
 };
@@ -46,10 +60,17 @@ const ui = {
   rendering: false,
   hooking: false,
   busy: new Set(),
+  /** Relatable drawings: writing the script, and ids of slides being drawn or waiting their turn. */
+  writing: false,
+  drawing: new Set(),
+  drawActive: new Set(),
+  drawQueue: [],
   justAdded: null,
   mine: { editing: false, searching: false, results: [] },
   settings: null,
-  post: { writing: false, scheduling: false, refreshing: false, channels: null, loadingChannels: false },
+  post: { writing: false, sending: false },
+  /** The QR code drawn for the open post's phone link. */
+  qr: { url: "", svg: "" },
   /** Account form open on the board: null, "new", or an account id. */
   editingAccount: null,
   /** Delete button waiting for a second click, e.g. "post:<id>". */
@@ -93,9 +114,15 @@ const isMine = (id) => myApp()?.trackId === id;
 /** How many gems fit next to the account's own app. */
 const gemCapacity = () => MAX_APPS - (myApp() ? 1 : 0);
 
+const formatOf = (p) => (p?.format === "drawn" ? "drawn" : "gems");
+const isDrawn = (p = post()) => formatOf(p) === "drawn";
+const drawnOf = (p = post()) => p?.drawn || null;
+/** The headline a post goes out with, whatever its format. */
+const postHook = (p) => (isDrawn(p) ? drawnOf(p)?.slides?.[0]?.text?.trim() || "" : hookText(p.slideOptions));
+
 /** Every app in a post, in slide order: the gems with the account's app at its chosen position. */
 function lineupFor(p) {
-  if (!p) return [];
+  if (!p || isDrawn(p)) return [];
   const mine = ownAppOf(p);
   const apps = [...p.picked];
   if (mine) apps.splice(Math.min((accountOf(p).myAppSlot || 3) - 1, apps.length), 0, mine);
@@ -142,10 +169,13 @@ function confirmed(key) {
 }
 
 /* ---------- navigation ---------- */
-const POST_VIEWS = ["find", "prepare", "slides"];
+const POST_VIEWS = ["find", "prepare", "write", "slides"];
 
 function setView(view) {
   if (POST_VIEWS.includes(view) && !post()) view = "board";
+  // Each format has its own steps before Slides.
+  if (isDrawn() && (view === "find" || view === "prepare")) view = "write";
+  if (post() && !isDrawn() && view === "write") view = "find";
   ui.view = view;
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("is-active", b.dataset.view === view));
   for (const v of ["board", ...POST_VIEWS, "analytics", "settings"]) $(`#view-${v}`).hidden = v !== view;
@@ -160,12 +190,20 @@ function setView(view) {
     $("#niche").value = post()?.niche || "";
     renderHookIdeas();
   }
+  if (view === "write") {
+    $("#drawn-topic").value = drawnOf()?.topic || "";
+    renderWrite();
+  }
 }
 
 function renderRail() {
   const p = post();
   $("#rail-post").hidden = !p;
-  document.querySelectorAll(".nav-step").forEach((b) => (b.disabled = !p));
+  const fmt = formatOf(p);
+  document.querySelectorAll(".nav-step").forEach((b) => {
+    b.disabled = !p;
+    if (b.dataset.format) b.hidden = b.dataset.format !== fmt;
+  });
   if (!p) return;
   $("#rail-account").textContent = handle(acct());
   const name = $("#post-name");
@@ -175,32 +213,30 @@ function renderRail() {
 
 /* ---------- Posts board ---------- */
 function postStatus(p) {
-  if (p.buffer) {
-    const s = p.buffer.status || "scheduled";
-    const label = { scheduled: "Reminder set", sent: "Posted", sending: "Sending", error: "Error", draft: "Draft in Buffer", needs_approval: "Needs approval" }[s] || s;
-    return { cls: `status-${s}`, label, detail: fmtWhen(p.buffer.dueAt) };
-  }
+  if (p.posted) return { cls: "status-sent", label: "Posted", detail: fmtWhen(p.posted.at) };
+  if (p.phone) return { cls: "status-phone", label: "On phone", detail: fmtWhen(p.phone.sentAt) };
   if (p.slides) return { cls: "status-ready", label: "Slides ready", detail: "" };
+  if (isDrawn(p)) {
+    const s = drawnOf(p)?.slides || [];
+    const drawn = s.filter((x) => x.image).length;
+    return { cls: "", label: "Draft", detail: s.length ? `${drawn} of ${s.length} slides drawn` : "Not written yet" };
+  }
   const n = lineupFor(p).length;
   return { cls: "", label: "Draft", detail: n ? `${n} of ${MAX_APPS} apps` : "No apps yet" };
 }
 
 function accountForm(a) {
   const id = a ? a.id : "new";
-  const chans = ui.post.channels || [];
-  const channelField = bufferReady()
-    ? `<label class="field">Buffer account
-        <select name="channel" ${ui.post.loadingChannels ? "disabled" : ""}>
-          <option value="">${ui.post.loadingChannels ? "Loading accounts" : "Not linked"}</option>
-          ${chans
-            .map((c) => `<option value="${esc(c.id)}" ${a?.channelId === c.id ? "selected" : ""}>${esc(channelLabel(c))}</option>`)
-            .join("")}
-        </select>
-      </label>`
-    : `<p class="hint">Add your Buffer key in Settings to link this account to Buffer.</p>`;
   return `<form class="acct-form" data-acct-form="${id}" autocomplete="off">
     <label class="field">TikTok username <input name="username" type="text" spellcheck="false" placeholder="@yourhandle" value="${esc(a ? handle(a).replace("Unnamed account", "") : "")}" /></label>
-    ${channelField}
+    <label class="field">Slideshow format
+      <select name="format">
+        ${Object.entries(FORMATS)
+          .map(([k, label]) => `<option value="${k}" ${(a?.format || "gems") === k ? "selected" : ""}>${esc(label)}</option>`)
+          .join("")}
+      </select>
+      <span class="field-note">New posts use this format. Existing posts keep theirs.</span>
+    </label>
     <div class="inline">
       <button type="submit" class="btn btn-primary btn-sm">${a ? "Save" : "Add account"}</button>
       <button type="button" class="btn btn-quiet" data-acct-cancel>Cancel</button>
@@ -211,9 +247,14 @@ function accountForm(a) {
 function postCard(p) {
   const st = postStatus(p);
   const lu = lineupFor(p);
+  const hookSlide = drawnOf(p)?.slides?.[0];
   const thumb = p.slides?.slides?.[0]
     ? `<img class="card-slide" src="${esc(fileSrc(p.slides.slides[0]))}?v=${p.slides.renderedAt || 0}" alt="" />`
-    : lu.length
+    : isDrawn(p)
+      ? hookSlide?.text
+        ? `<div class="card-drawn">${hookSlide.image ? `<img src="${esc(fileSrc(hookSlide.image))}" alt="" />` : ""}<span>${esc(hookSlide.text)}</span></div>`
+        : `<div class="card-empty">Not written yet</div>`
+      : lu.length
       ? `<div class="card-icons">${lu
           .map((a) => {
             const pr = preparedFor(a.trackId);
@@ -233,10 +274,6 @@ function postCard(p) {
 }
 
 function renderBoard() {
-  const hasScheduled = state.posts.some((p) => p.buffer && p.buffer.status !== "sent");
-  $("#refresh-posts").hidden = !hasScheduled;
-  $("#refresh-posts").disabled = ui.post.refreshing;
-  $("#refresh-posts").textContent = ui.post.refreshing ? "Refreshing" : "Refresh status";
   $("#add-account").hidden = ui.editingAccount === "new";
 
   const parts = [];
@@ -250,7 +287,7 @@ function renderBoard() {
         : `<header class="acct-head">
             <div>
               <h2>${esc(handle(a))}</h2>
-              <p class="acct-sub">${a.channelId ? `Buffer: ${esc(a.channelName || "linked")}` : "Not linked to Buffer"}${a.myApp ? `. Promotes ${esc(a.myApp.trackName)}` : ""}</p>
+              <p class="acct-sub">${esc(FORMATS[a.format] || FORMATS.gems)}${a.myApp ? `. Promotes ${esc(a.myApp.trackName)}` : ""}</p>
             </div>
             <div class="inline">
               <button class="btn btn-quiet" data-edit-acct="${a.id}">Edit</button>
@@ -272,24 +309,35 @@ function renderBoard() {
 function newPost(accountId) {
   const a = state.accounts.find((x) => x.id === accountId);
   if (!a) return;
-  const prev = postsOf(a).at(-1);
-  // Carry the account's look over from its latest post, and bump the part number.
+  const format = a.format === "drawn" ? "drawn" : "gems";
+  // Carry the account's look over from its latest post of the same format, and bump the part number.
+  const prev = postsOf(a).filter((q) => formatOf(q) === format).at(-1);
   const slideOptions = prev ? { ...prev.slideOptions } : { ...DEFAULT_SLIDE_OPTIONS };
   if (prev && Number(slideOptions.part) > 0) slideOptions.part = Number(slideOptions.part) + 1;
+  // Each post starts with a blank hook; colours and the rest carry over.
+  Object.assign(slideOptions, { hookAccent: "", hookLine2: "", hookLine3: "" });
   const p = {
     id: uid(),
     accountId,
+    format,
+    drawn:
+      format === "drawn"
+        ? { topic: "", points: prev?.drawn?.points || DEFAULT_POINTS, accent: "", slides: [], plug: null, style: { ...DEFAULT_DRAWN_STYLE, ...(prev?.drawn?.style || {}) } }
+        : undefined,
     name: `Post ${postsOf(a).length + 1}`,
     createdAt: Date.now(),
-    niche: prev?.niche || "",
+    niche: "",
     picked: [],
     slideOptions,
     slides: null,
     caption: { title: "", caption: "", hashtags: [] },
-    buffer: null,
+    phone: null,
+    posted: null,
   };
   state.posts.push(p);
-  openPost(p.id, "find");
+  // A new post starts with a clean search, not the last post's results.
+  if (!ui.searching) Object.assign(state, { results: [], resultsNiche: "", resultsNote: "" });
+  openPost(p.id, format === "drawn" ? "write" : "find");
   save();
 }
 
@@ -298,10 +346,9 @@ function openPost(id, view) {
   if (!p) return;
   state.currentPostId = id;
   ui.mine = { editing: false, searching: false, results: [] };
-  $("#post-when").value = "";
   renderSlideSettings();
   renderAll();
-  setView(view || (p.slides ? "slides" : lineupFor(p).length ? "prepare" : "find"));
+  setView(view || (p.slides ? "slides" : isDrawn(p) ? "write" : lineupFor(p).length ? "prepare" : "find"));
   save();
 }
 
@@ -309,18 +356,13 @@ function saveAccountForm(form) {
   const id = form.dataset.acctForm;
   const username = cleanUsername(form.username.value);
   if (!username) return toast("Enter the TikTok username for this account.", true);
-  let channelId = form.channel ? form.channel.value : undefined;
-  const chans = ui.post.channels || [];
-  // Link the Buffer account with the same name if none was picked.
-  if (form.channel && !channelId) channelId = chans.find((c) => (c.name || "").toLowerCase() === username.toLowerCase())?.id || "";
-  const ch = chans.find((c) => c.id === channelId);
+  const format = form.format?.value === "drawn" ? "drawn" : "gems";
   if (id === "new") {
     const first = state.accounts[0];
     state.accounts.push({
       id: uid(),
       username,
-      channelId: channelId || "",
-      channelName: ch ? ch.displayName || ch.name : "",
+      format,
       // New accounts start out promoting the same app as the first one; change it per account.
       myApp: first?.myApp || null,
       myAppSlot: first?.myAppSlot || 3,
@@ -330,10 +372,7 @@ function saveAccountForm(form) {
     const a = state.accounts.find((x) => x.id === id);
     if (!a) return;
     a.username = username;
-    if (channelId !== undefined) {
-      a.channelId = channelId;
-      a.channelName = ch ? ch.displayName || ch.name : "";
-    }
+    a.format = format;
   }
   ui.editingAccount = null;
   renderAll();
@@ -343,14 +382,12 @@ function saveAccountForm(form) {
 
 function startAccountForm(id) {
   ui.editingAccount = id;
-  if (bufferReady() && ui.post.channels === null && !ui.post.loadingChannels) loadChannels();
   renderBoard();
   $(`[data-acct-form="${id}"] input[name="username"]`)?.focus();
 }
 
 function bindBoard() {
   $("#add-account").addEventListener("click", () => startAccountForm("new"));
-  $("#refresh-posts").addEventListener("click", refreshPosts);
   const board = $("#board");
   board.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -391,9 +428,9 @@ function bindBoard() {
 /** Uses within this many days (and drafts, which are still to come) count as recent. */
 const RECENT_DAYS = 30;
 const DAY_MS = 86_400_000;
-const isMade = (p) => !!(p.slides || p.buffer);
-/** When a post goes (or went) out: its Buffer time, else when its slides were made, else when it was created. */
-const postTime = (p) => (p.buffer?.dueAt ? Date.parse(p.buffer.dueAt) : p.slides?.renderedAt || p.createdAt);
+const isMade = (p) => !!(p.slides || p.phone || p.posted);
+/** When a post went out: when you marked it posted, else sent it to your phone, else made its slides, else created it. */
+const postTime = (p) => p.posted?.at || p.phone?.sentAt || p.slides?.renderedAt || p.createdAt;
 const hookKey = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const isRecent = (p) => !isMade(p) || Math.abs(Date.now() - postTime(p)) <= RECENT_DAYS * DAY_MS;
 function ago(t) {
@@ -418,7 +455,7 @@ function hookRepeats(text, p = post()) {
   const key = hookKey(text);
   if (!a || !key) return [];
   return postsOf(a)
-    .filter((q) => q.id !== p?.id && isMade(q) && hookKey(hookText(q.slideOptions)) === key)
+    .filter((q) => q.id !== p?.id && isMade(q) && hookKey(postHook(q)) === key)
     .sort((x, y) => postTime(y) - postTime(x));
 }
 
@@ -607,9 +644,109 @@ function togglePick(id) {
   save();
 }
 
+/* ---------- Slot menu (click or right-click an app on the phone) ---------- */
+let slotMenuFor = null;
+
+function openSlotMenu(btn, x, y) {
+  const id = Number(btn.dataset.slot);
+  const app = lineup().find((a) => a.trackId === id);
+  if (!app) return;
+  const own = isMine(id);
+  const items = own
+    ? [
+        ["skip", "Leave out of this post"],
+        ["change", "Change your app"],
+      ]
+    : [["remove", "Remove from post", "is-danger"]];
+  if (app.trackViewUrl) items.push(["store", "Open in App Store"]);
+  const menu = $("#slot-menu");
+  menu.innerHTML =
+    `<p class="ctx-title">${esc(app.trackName)}</p>` +
+    items.map(([act, label, cls = ""]) => `<button type="button" role="menuitem" class="${cls}" data-act="${act}">${label}</button>`).join("");
+  slotMenuFor = { id, btn };
+  menu.hidden = false;
+  // Below the icon (or at the pointer for a right-click), kept inside the window.
+  const r = btn.getBoundingClientRect();
+  const left = x ?? r.left + r.width / 2 - menu.offsetWidth / 2;
+  const top = y ?? r.bottom + 6;
+  menu.style.left = `${Math.max(8, Math.min(left, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${top + menu.offsetHeight > innerHeight - 8 ? Math.max(8, (y ?? r.top - 6) - menu.offsetHeight) : top}px`;
+  btn.setAttribute("aria-expanded", "true");
+  menu.querySelector("button").focus();
+}
+
+function closeSlotMenu(refocus = true) {
+  const menu = $("#slot-menu");
+  if (menu.hidden) return;
+  menu.hidden = true;
+  const btn = slotMenuFor?.btn;
+  slotMenuFor = null;
+  if (btn?.isConnected) {
+    btn.removeAttribute("aria-expanded");
+    if (refocus) btn.focus();
+  }
+}
+
+function slotMenuAction(act) {
+  const id = slotMenuFor?.id;
+  closeSlotMenu(act !== "change");
+  const app = lineup().find((a) => a.trackId === id);
+  if (!app) return;
+  if (act === "remove") togglePick(id);
+  else if (act === "skip") toggleSkipMine();
+  else if (act === "change") {
+    ui.mine.editing = true;
+    renderMine();
+    $("#mine-query").focus();
+  } else if (act === "store") window.__TAURI__.opener.openUrl(app.trackViewUrl).catch((e) => toast(`Couldn't open the App Store: ${e}`, true));
+}
+
+function bindSlotMenu() {
+  const grid = $("#home-grid");
+  grid.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-slot]");
+    if (!b) return;
+    if (slotMenuFor?.btn === b) return closeSlotMenu();
+    openSlotMenu(b);
+  });
+  grid.addEventListener("contextmenu", (e) => {
+    const b = e.target.closest("[data-slot]");
+    if (!b) return;
+    e.preventDefault();
+    openSlotMenu(b, e.clientX, e.clientY);
+  });
+  const menu = $("#slot-menu");
+  menu.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-act]");
+    if (b) slotMenuAction(b.dataset.act);
+  });
+  menu.addEventListener("keydown", (e) => {
+    const items = [...menu.querySelectorAll("button")];
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
+    } else if (e.key === "Tab") closeSlotMenu(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !menu.hidden) closeSlotMenu();
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (!menu.hidden && !menu.contains(e.target) && !e.target.closest("[data-slot]")) closeSlotMenu(false);
+  });
+  addEventListener("resize", () => closeSlotMenu(false));
+  document.addEventListener("scroll", () => closeSlotMenu(false), true);
+}
+
 /* ---------- Tray ---------- */
 function renderTray() {
   const p = post();
+  const drawnMode = isDrawn(p);
+  $(".phone").hidden = drawnMode;
+  $("#dprev").hidden = !drawnMode;
+  $("#artist-row").hidden = !drawnMode;
+  $("#writer-label").textContent = drawnMode ? "Writing by" : "Overviews by";
+  if (drawnMode) return renderDrawnTray(p);
   const apps = lineup();
   const mine = myApp();
   // On the phone, your app sits in its chosen slot even before the gems around it are added.
@@ -626,7 +763,7 @@ function renderTray() {
       const own = isMine(a.trackId);
       return `<li class="slot is-filled ${ui.justAdded === a.trackId ? "is-new" : ""}">
         ${own ? `<span class="slot-badge" title="Your app">You</span>` : ""}
-        <button ${own ? `data-mine` : `data-unpick="${a.trackId}"`} title="${own ? "Your app. Change it below." : `Remove ${esc(a.trackName)}`}">
+        <button data-slot="${a.trackId}" aria-haspopup="menu" title="${esc(a.trackName)}${own ? " (your app)" : ""}">
           <img class="slot-icon" src="${esc(src)}" alt="" />
           <span class="slot-label">${esc(a.trackName)}</span>
         </button>
@@ -663,9 +800,10 @@ function renderTray() {
   warn.textContent = recent.length
     ? `Already on ${handle(acct())} recently: ${recent.map(({ a, q }) => `${a.trackName} (${repeatLabel(q)})`).join(", ")}.`
     : "";
-  document.querySelectorAll("#home-grid [data-unpick]").forEach((b) => {
-    b.parentElement.classList.toggle("is-repeat", recent.some((r) => String(r.a.trackId) === b.dataset.unpick));
+  document.querySelectorAll("#home-grid [data-slot]").forEach((b) => {
+    b.parentElement.classList.toggle("is-repeat", recent.some((r) => String(r.a.trackId) === b.dataset.slot));
   });
+  closeSlotMenu(false);
 
   const btn = $("#prepare-btn");
   btn.disabled = todo === 0;
@@ -676,6 +814,33 @@ function renderTray() {
       : n
         ? "All apps prepared"
         : "Prepare apps";
+}
+
+/** The tray for a relatable-drawings post: a live preview of its hook slide and a Draw button. */
+function renderDrawnTray(p) {
+  const d = drawnOf(p);
+  const hook = d?.slides?.[0];
+  const st = d?.style || DEFAULT_DRAWN_STYLE;
+  const prev = $("#dprev");
+  prev.style.background = st.background;
+  prev.style.color = st.text;
+  $("#dprev-text").innerHTML = hook?.text ? accentHtml(hook.text, d.accent, st.accent) : `<span class="dprev-empty">Your hook shows here</span>`;
+  const art = $("#dprev-art");
+  art.hidden = !hook?.image;
+  if (hook?.image) art.src = fileSrc(hook.image);
+  $("#mine").hidden = !p;
+  $("#tray-repeats").hidden = true;
+  closeSlotMenu(false);
+
+  const all = drawnSlides(p);
+  const done = all.filter((s) => s.image).length;
+  const todo = all.filter((s) => !s.image && s.scene.trim() && !ui.drawing.has(s.id)).length;
+  const busy = all.filter((s) => ui.drawing.has(s.id)).length;
+  $("#tray-status").textContent = !all.length ? "Write the slideshow to start." : `${done} of ${all.length} slides drawn`;
+  const btn = $("#prepare-btn");
+  btn.disabled = todo === 0;
+  const n = (k) => `${k} slide${k > 1 ? "s" : ""}`;
+  btn.textContent = busy ? `Drawing ${n(busy)}` : todo ? `Draw ${n(todo)} with ${WRITER_NAMES[state.artist]}` : all.length ? "All slides drawn" : "Draw slides";
 }
 
 /* ---------- Prepared ---------- */
@@ -757,6 +922,286 @@ function rewrite(id) {
     });
 }
 
+/* ---------- Write (relatable drawings) ---------- */
+/** The plug slide, if this post ends with one (it needs the account's app, not left out). */
+const activePlug = (p = post()) => (ownAppOf(p) && drawnOf(p)?.plug) || null;
+/** Every slide in order, the plug last. */
+function drawnSlides(p = post()) {
+  const d = drawnOf(p);
+  if (!d) return [];
+  const plug = activePlug(p);
+  return plug ? [...d.slides, plug] : [...d.slides];
+}
+function findDrawnSlide(id, p = post()) {
+  const d = drawnOf(p);
+  return d?.slides.find((s) => s.id === id) || (d?.plug?.id === id ? d.plug : null);
+}
+const newDrawnSlide = (s = {}) => ({ id: uid(), text: s.text || "", scene: s.scene || "", image: s.image || null });
+
+/** The text with its accent words in the highlight colour, as on the slide. */
+function accentHtml(text, accent, color) {
+  const i = accent ? text.toLowerCase().indexOf(accent.toLowerCase()) : -1;
+  if (i < 0) return esc(text);
+  return `${esc(text.slice(0, i))}<span style="color:${esc(color)}">${esc(text.slice(i, i + accent.length))}</span>${esc(text.slice(i + accent.length))}`;
+}
+
+function renderWrite() {
+  const p = post();
+  const d = drawnOf(p);
+  if (!d || ui.view !== "write") return;
+  const writer = WRITER_NAMES[state.writer];
+  const artist = WRITER_NAMES[state.artist];
+  const app = ownAppOf(p);
+  const has = d.slides.length > 0;
+
+  $("#drawn-points").innerHTML = [3, 4, 5, 6, 7, 8, 9].map((n) => `<option value="${n}" ${d.points === n ? "selected" : ""}>${n}</option>`).join("");
+  const btn = $("#write-btn");
+  btn.disabled = ui.writing;
+  btn.textContent = ui.writing ? `${writer} is writing` : has ? `Write again with ${writer}` : `Write with ${writer}`;
+  $("#write-hint").textContent = has
+    ? "Writing again replaces these slides and their drawings."
+    : `${writer} writes the hook, ${d.points} slides${app ? ` and a last slide about ${app.trackName}` : ""}. Then ${artist} draws each one.`;
+
+  const reps = hookRepeats(postHook(p));
+  const rep = $("#drawn-repeat");
+  rep.hidden = !reps.length;
+  rep.classList.toggle("is-old", !!reps.length && !isRecent(reps[0]));
+  rep.textContent = reps.length ? `${handle(acct())} already used this hook in ${reps.map(repeatLabel).join("; ")}.` : "";
+
+  const all = drawnSlides(p);
+  const todo = all.filter((s) => !s.image && s.scene.trim() && !ui.drawing.has(s.id)).length;
+  $("#drawn-bar").hidden = !has;
+  $("#write-empty").hidden = has || ui.writing;
+  const drawAllBtn = $("#draw-all");
+  drawAllBtn.disabled = !todo;
+  drawAllBtn.textContent = todo ? `Draw ${todo} with ${artist}` : all.some((s) => ui.drawing.has(s.id)) ? "Drawing" : "All drawn";
+  $("#drawn-count").textContent = has ? `${all.filter((s) => s.image).length} of ${all.length} drawn. Each drawing takes about a minute.` : "";
+
+  const item = (s, label, o = {}) => {
+    const busy = ui.drawing.has(s.id);
+    const active = ui.drawActive?.has(s.id);
+    const art = busy
+      ? `<span class="loading-row"><span class="spinner"></span>${active ? "Drawing" : "Waiting"}</span>`
+      : s.image
+        ? `<img src="${esc(fileSrc(s.image))}" alt="" />`
+        : `<span class="dslide-noart">No drawing yet</span>`;
+    const moves = o.point
+      ? `<button type="button" class="btn btn-quiet btn-icon" data-move-up="${s.id}" ${o.idx <= 1 ? "disabled" : ""} aria-label="Move up" title="Move up">↑</button>
+         <button type="button" class="btn btn-quiet btn-icon" data-move-down="${s.id}" ${o.last ? "disabled" : ""} aria-label="Move down" title="Move down">↓</button>
+         <button type="button" class="btn btn-quiet" data-remove-slide="${s.id}">Remove</button>`
+      : o.plug
+        ? `<button type="button" class="btn btn-quiet" data-remove-plug>Remove</button>`
+        : "";
+    return `<li class="dslide" data-id="${s.id}">
+      <div class="dslide-art" style="background:${esc(d.style.background)}">${art}</div>
+      <div class="dslide-body">
+        <div class="dslide-top">
+          <span class="dslide-label">${esc(label)}</span>
+          <span class="dslide-actions">
+            <button type="button" class="btn btn-quiet" data-draw="${s.id}" ${busy || !s.scene.trim() ? "disabled" : ""}>${busy ? (active ? "Drawing" : "Waiting") : s.image ? "Redraw" : "Draw"}</button>
+            ${moves}
+          </span>
+        </div>
+        <textarea class="overview dslide-text" data-dtext="${s.id}" rows="2" aria-label="${esc(label)} text">${esc(s.text)}</textarea>
+        ${o.hook ? `<label class="field dslide-field">Highlighted words <input type="text" data-daccent value="${esc(d.accent)}" placeholder="loneliness" /></label>` : ""}
+        <label class="field dslide-field">Drawing shows <input type="text" data-dscene="${s.id}" value="${esc(s.scene)}" placeholder="a stick figure alone on a bench, looking at their phone" /></label>
+      </div>
+    </li>`;
+  };
+
+  let html = "";
+  if (ui.writing && !has) html = `<li class="loading-row"><span class="spinner"></span>${esc(writer)} is writing a slideshow about ${esc(d.topic)}</li>`;
+  html += d.slides
+    .map((s, i) => item(s, i === 0 ? "Hook" : `Slide ${i + 1}`, { hook: i === 0, point: i > 0, idx: i, last: i === d.slides.length - 1 }))
+    .join("");
+  if (has) {
+    const mineApp = acct()?.myApp;
+    if (app && d.plug) html += item(d.plug, `Last slide: ${app.trackName}`, { plug: true });
+    else if (app) html += `<li class="dslide-note"><button type="button" class="btn btn-quiet" data-add-plug>Add a last slide about ${esc(app.trackName)}</button></li>`;
+    else if (mineApp) html += `<li class="dslide-note">${esc(mineApp.trackName)} is left out of this post, so it ends on the slide above.</li>`;
+    else html += `<li class="dslide-note">Pick your app in the panel to end each post with a slide about it.</li>`;
+  }
+
+  // Keep the caret where it was if a drawing finishes while you're typing.
+  const list = $("#drawn-list");
+  const focus = document.activeElement;
+  const key = list.contains(focus) ? [...focus.attributes].find((a) => a.name.startsWith("data-d"))?.name : null;
+  const sel = key ? [focus.getAttribute(key), focus.selectionStart, focus.selectionEnd] : null;
+  list.innerHTML = html;
+  if (key) {
+    const el = list.querySelector(sel[0] ? `[${key}="${CSS.escape(sel[0])}"]` : `[${key}]`);
+    if (el) {
+      el.focus();
+      el.setSelectionRange?.(sel[1], sel[2]);
+    }
+  }
+}
+
+async function writeDrawn() {
+  const p = post();
+  const d = drawnOf(p);
+  if (!d || ui.writing) return;
+  const topic = $("#drawn-topic").value.trim();
+  if (!topic) return toast("Enter a topic first, like adult friendships or burnout.", true);
+  d.topic = topic;
+  ui.writing = true;
+  renderWrite();
+  try {
+    const used = usedHooks(p);
+    if (d.slides[0]?.text) used.push(d.slides[0].text);
+    const r = await invoke("write_drawn", { topic, points: d.points, ownApp: ownAppOf(p), used, writer: state.writer });
+    // Drawings still on their way belong to the old slides.
+    ui.drawQueue = ui.drawQueue.filter((j) => j.postId !== p.id);
+    d.slides = r.slides.map(newDrawnSlide);
+    d.accent = r.accent || "";
+    d.plug = r.plug ? newDrawnSlide(r.plug) : null;
+    save();
+    toast(`${WRITER_NAMES[state.writer]} wrote ${d.slides.length} slides${d.plug ? " and a last slide" : ""}`);
+  } catch (e) {
+    toast(`Couldn't write the slideshow: ${e}`, true);
+  } finally {
+    ui.writing = false;
+    renderAll();
+  }
+}
+
+/** An earlier drawing from the post, so Codex keeps one line style across the slideshow. */
+function styleRefFor(p, id) {
+  const all = drawnSlides(p);
+  return (all.find((s) => s.id !== id && s.image) || {}).image || null;
+}
+
+function queueDraw(ids) {
+  const p = post();
+  if (!p) return;
+  for (const id of ids) {
+    if (ui.drawing.has(id)) continue;
+    ui.drawing.add(id);
+    ui.drawQueue.push({ postId: p.id, id });
+  }
+  pumpDraws();
+  renderAll();
+}
+
+function pumpDraws() {
+  ui.drawActive ||= new Set();
+  while (ui.drawActive.size < DRAW_PARALLEL && ui.drawQueue.length) {
+    const job = ui.drawQueue[0];
+    const p = state.posts.find((x) => x.id === job.postId);
+    const s = p && findDrawnSlide(job.id, p);
+    if (!s || !s.scene.trim()) {
+      ui.drawQueue.shift();
+      ui.drawing.delete(job.id);
+      continue;
+    }
+    // Codex matches the first drawing's style, so with none yet, draw one before the rest.
+    const running = drawnSlides(p).some((x) => ui.drawActive.has(x.id));
+    if (state.artist === "codex" && running && !drawnSlides(p).some((x) => x.image)) break;
+    ui.drawQueue.shift();
+    ui.drawActive.add(job.id);
+    const scene = s.scene;
+    invoke("draw_scene", { scene, artist: state.artist, styleRef: state.artist === "codex" ? styleRefFor(p, s.id) : null })
+      .then((path) => {
+        const cur = findDrawnSlide(job.id, p);
+        if (cur) {
+          cur.image = path;
+          save();
+        }
+      })
+      .catch((e) => toast(`Couldn't draw "${s.text.slice(0, 40) || scene.slice(0, 40)}": ${e}`, true))
+      .finally(() => {
+        ui.drawActive.delete(job.id);
+        ui.drawing.delete(job.id);
+        pumpDraws();
+        renderAll();
+      });
+  }
+}
+
+function drawAll() {
+  queueDraw(drawnSlides().filter((s) => !s.image && s.scene.trim()).map((s) => s.id));
+}
+
+function bindWrite() {
+  $("#write-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    writeDrawn();
+  });
+  $("#drawn-topic").addEventListener("input", (e) => {
+    const d = drawnOf();
+    if (!d) return;
+    d.topic = e.target.value;
+    save();
+  });
+  $("#drawn-points").addEventListener("change", (e) => {
+    const d = drawnOf();
+    if (!d) return;
+    d.points = Number(e.target.value) || DEFAULT_POINTS;
+    renderWrite();
+    save();
+  });
+  $("#draw-all").addEventListener("click", drawAll);
+  $("#add-slide").addEventListener("click", () => {
+    const d = drawnOf();
+    if (!d) return;
+    const s = newDrawnSlide();
+    d.slides.push(s);
+    renderAll();
+    save();
+    $(`[data-dtext="${s.id}"]`)?.focus();
+  });
+
+  const list = $("#drawn-list");
+  list.addEventListener("click", (e) => {
+    const d = drawnOf();
+    if (!d) return;
+    const t = (sel) => e.target.closest(sel);
+    let b;
+    if ((b = t("[data-draw]"))) return queueDraw([b.dataset.draw]);
+    if ((b = t("[data-move-up]")) || (b = t("[data-move-down]"))) {
+      const id = b.dataset.moveUp || b.dataset.moveDown;
+      const i = d.slides.findIndex((s) => s.id === id);
+      const j = b.dataset.moveUp ? i - 1 : i + 1;
+      // The hook stays first.
+      if (i < 1 || j < 1 || j >= d.slides.length) return;
+      [d.slides[i], d.slides[j]] = [d.slides[j], d.slides[i]];
+    } else if ((b = t("[data-remove-slide]"))) {
+      d.slides = d.slides.filter((s, i) => i === 0 || s.id !== b.dataset.removeSlide);
+    } else if (t("[data-remove-plug]")) {
+      d.plug = null;
+    } else if (t("[data-add-plug]")) {
+      d.plug = newDrawnSlide({ scene: "a stick figure smiling at their phone, looking calmer and less alone" });
+    } else return;
+    renderAll();
+    save();
+  });
+  list.addEventListener("input", (e) => {
+    const p = post();
+    const d = drawnOf(p);
+    if (!d) return;
+    const el = e.target;
+    if (el.dataset.dtext) {
+      const s = findDrawnSlide(el.dataset.dtext, p);
+      if (s) s.text = el.value;
+      if (s === d.slides[0]) renderTray();
+    } else if (el.dataset.dscene) {
+      const s = findDrawnSlide(el.dataset.dscene, p);
+      if (!s) return;
+      s.scene = el.value;
+      const btn = list.querySelector(`[data-draw="${CSS.escape(s.id)}"]`);
+      if (btn && !ui.drawing.has(s.id)) btn.disabled = !s.scene.trim();
+    } else if (el.hasAttribute("data-daccent")) {
+      d.accent = el.value;
+      renderTray();
+    } else return;
+    save();
+  });
+  // Re-check the hook against earlier posts once you've finished typing it.
+  list.addEventListener("change", (e) => {
+    if (e.target.dataset.dtext && e.target.dataset.dtext === drawnOf()?.slides[0]?.id) renderWrite();
+  });
+}
+
 /* ---------- Slides ---------- */
 const HEX = /^#[0-9a-f]{6}$/i;
 
@@ -770,25 +1215,45 @@ function renderSlideSettings() {
     const hex = $(`[data-hex="${key}"]`);
     if (document.activeElement !== hex) hex.value = o[key];
   }
+  const st = drawnOf()?.style || DEFAULT_DRAWN_STYLE;
+  for (const key of Object.keys(DEFAULT_DRAWN_STYLE)) {
+    $(`[data-dcolor="${key}"]`).value = st[key];
+    const hex = $(`[data-dhex="${key}"]`);
+    if (document.activeElement !== hex) hex.value = st[key];
+  }
 }
 
 function renderSlides() {
   const p = post();
+  const drawnMode = isDrawn(p);
+  $("#slide-settings").hidden = drawnMode;
+  $("#drawn-settings").hidden = !drawnMode;
   const apps = slideApps();
-  $("#slides-lede").textContent = apps.length
-    ? `Uses this post's ${apps.length} prepared app${apps.length > 1 ? "s" : ""}, in the order shown on the phone. Slides are 2160 × 2700 JPEGs.`
-    : "Prepare this post's apps first. Slides use the apps on the phone, in that order.";
+  const written = drawnSlides(p).filter((s) => s.text.trim());
+  const bare = written.filter((s) => !s.image).length;
+  $("#slides-lede").textContent = drawnMode
+    ? written.length
+      ? `${written.length} slides from Write${bare ? `. ${bare} without a drawing will be text only` : ""}. Slides are 2160 × 2700 JPEGs.`
+      : "Write the slideshow first. Slides use the text and drawings from Write."
+    : apps.length
+      ? `Uses this post's ${apps.length} prepared app${apps.length > 1 ? "s" : ""}, in the order shown on the phone. Slides are 2160 × 2700 JPEGs.`
+      : "Prepare this post's apps first. Slides use the apps on the phone, in that order.";
+  $("#slides-empty p:last-child").textContent = drawnMode
+    ? "Pick your colours, then press Make slides. You'll get 2160 × 2700 JPEGs: the hook, one slide per line, and the slide about your app."
+    : "Pick your text and colours, then press Make slides. You'll get 2160 × 2700 JPEGs: the hook, one slide per app, and the last slide.";
   const btn = $("#make-slides");
-  btn.disabled = ui.rendering || !apps.length;
+  btn.disabled = ui.rendering || !(drawnMode ? written.length : apps.length);
   btn.textContent = ui.rendering ? "Making slides" : p?.slides ? "Make slides again" : "Make slides";
 
   const last = p?.slides;
+  const plugLast = drawnMode && !!activePlug(p);
   $("#show-folder").hidden = !last;
   $("#slides-empty").hidden = !!last;
   $("#thumbs").innerHTML = last
     ? last.slides
         .map((s, i) => {
-          const label = i === 0 ? "Hook" : i === last.slides.length - 1 ? "Last slide" : `App ${i}`;
+          const end = i === last.slides.length - 1;
+          const label = i === 0 ? "Hook" : drawnMode ? (end && plugLast ? "Your app" : `Slide ${i + 1}`) : end ? "Last slide" : `App ${i}`;
           return `<li><figure><img src="${esc(fileSrc(s))}?v=${last.renderedAt}" alt="${label}" /><figcaption>${i + 1}. ${label}</figcaption></figure></li>`;
         })
         .join("")
@@ -801,14 +1266,50 @@ function renderSlides() {
 const hookText = (o) => [o.hookAccent, o.hookLine2, o.hookLine3].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
 const ideaText = (h) => [h.accent, h.line2, h.line3].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
 
+/** What kind of hooks to suggest. Kept per account, since an account usually sticks to one kind. */
+const HOOK_MODES = ["generic", "niche", "fit"];
+const hookStyle = () => {
+  const s = acct()?.hookStyle || {};
+  return { mode: HOOK_MODES.includes(s.mode) ? s.mode : "fit", niche: s.niche || "" };
+};
+const needsHookNiche = () => {
+  const s = hookStyle();
+  return s.mode === "niche" && !s.niche.trim();
+};
+function setHookStyle(patch) {
+  const a = acct();
+  if (!a) return;
+  a.hookStyle = { ...hookStyle(), ...patch };
+  renderHookIdeas();
+  save();
+}
+function hookModeNote(p) {
+  const s = hookStyle();
+  if (s.mode === "generic") return `Broad hooks any iPhone user would stop for, like "underrated iphone apps". No niche.`;
+  if (s.mode === "niche") return s.niche.trim() ? `Every hook speaks to people into ${s.niche.trim()}.` : "Type the niche the hooks should speak to.";
+  const parts = [ownAppOf(p) && "your app", slideApps().length && "the apps you've picked", p?.niche?.trim() && `"${p.niche.trim()}"`].filter(Boolean);
+  return parts.length
+    ? `Fits ${parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0]}.`
+    : "Fits the apps you pick for this post. With none picked yet, the hooks come out general.";
+}
+
 /** Hook ideas appear in Find apps (to start a post from a hook) and in Slides; both stay in sync. */
 function renderHookIdeas() {
   const p = post();
   const o = opts();
   const writer = WRITER_NAMES[state.writer];
   const has = !!p?.hookIdeas?.length;
+  const hs = hookStyle();
+  document.querySelectorAll("[data-hook-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.hookMode === hs.mode)));
+  document.querySelectorAll("[data-hook-niche]").forEach((input) => {
+    input.hidden = hs.mode !== "niche";
+    if (document.activeElement !== input) input.value = hs.niche;
+    if (!hs.niche && p?.niche) input.placeholder = p.niche;
+  });
+  const note = p ? hookModeNote(p) : "";
+  document.querySelectorAll("[data-hook-mode-note]").forEach((el) => (el.textContent = note));
   document.querySelectorAll("[data-hook-suggest]").forEach((btn) => {
-    btn.disabled = !p || ui.hooking;
+    btn.disabled = !p || ui.hooking || needsHookNiche();
     btn.textContent = ui.hooking ? `${writer} is writing hooks` : has ? "More hook ideas" : `Suggest hooks with ${writer}`;
   });
   document.querySelectorAll("[data-hook-clear]").forEach((b) => (b.hidden = !has || ui.hooking));
@@ -862,9 +1363,11 @@ function renderHookIdeas() {
   });
 
   const rest = [o.hookLine2, o.hookLine3].filter(Boolean).map(esc).join(" ");
-  $("#find-hook-text").innerHTML = p
-    ? `This post's hook: <b style="color:${esc(o.accent)}">${esc(o.hookAccent)}</b> ${rest}. Pick a new one, then Ask ${esc(writer)} for apps that fit it.`
-    : "";
+  $("#find-hook-text").innerHTML = !p
+    ? ""
+    : !current
+    ? `No hook yet. Suggest some below, or type your own in Slides.`
+    : `This post's hook: <b style="color:${esc(o.accent)}">${esc(o.hookAccent)}</b> ${rest}. Pick a new one, then Ask ${esc(writer)} for apps that fit it.`;
 }
 
 /* Saved hooks belong to the account, so they're there for every post (and go with the settings code). */
@@ -908,7 +1411,7 @@ function saveCurrentHook() {
 function usedHooks(p) {
   const a = accountOf(p);
   const used = new Set();
-  for (const q of a ? postsOf(a) : []) if (q.id !== p.id && q.slides) used.add(hookText(q.slideOptions));
+  for (const q of a ? postsOf(a) : []) if (q.id !== p.id && q.slides) used.add(postHook(q));
   for (const h of p.hookIdeas || []) used.add(ideaText(h));
   for (const t of p.seenHooks || []) used.add(t);
   for (const h of a?.savedHooks || []) used.add(ideaText(h));
@@ -918,11 +1421,17 @@ function usedHooks(p) {
 async function suggestHooks() {
   const p = post();
   if (!p || ui.hooking) return;
+  const hs = hookStyle();
+  if (needsHookNiche()) {
+    document.querySelector(".view:not([hidden]) [data-hook-niche]")?.focus();
+    return toast("Type a niche for the hooks first.", true);
+  }
   ui.hooking = true;
   renderHookIdeas();
   try {
     const ideas = await invoke("suggest_hooks", {
-      niche: p.niche || "",
+      style: hs.mode,
+      niche: hs.mode === "niche" ? hs.niche.trim() : hs.mode === "fit" ? p.niche || "" : "",
       ownApp: ownAppOf(p),
       apps: slideApps(),
       count: MAX_APPS,
@@ -964,11 +1473,22 @@ function useHook(h) {
 async function makeSlides() {
   const p = post();
   const apps = slideApps();
-  if (!p || !apps.length || ui.rendering) return;
+  const d = drawnOf(p);
+  if (!p || ui.rendering || (isDrawn(p) ? !drawnSlides(p).some((s) => s.text.trim()) : !apps.length)) return;
+  if (!isDrawn(p) && !hookText(p.slideOptions)) return toast("Add a hook first: pick a suggested one or type it in the hook fields.", true);
   ui.rendering = true;
   renderSlides();
   try {
-    const out = await invoke("render_slides", { apps, options: p.slideOptions });
+    const plug = activePlug(p);
+    const out = isDrawn(p)
+      ? await invoke("render_drawn", {
+          slides: d.slides.filter((s) => s.text.trim()),
+          accent: d.accent || "",
+          plug,
+          plugApp: plug ? ownAppOf(p) : null,
+          style: d.style,
+        })
+      : await invoke("render_slides", { apps, options: p.slideOptions });
     p.slides = { ...out, renderedAt: Date.now() };
     save();
     toast(`Made ${out.slides.length} slides`);
@@ -1017,7 +1537,63 @@ function bindSlides() {
     save();
   });
   $("#slide-settings").addEventListener("submit", (e) => e.preventDefault());
+  $("#drawn-settings").addEventListener("submit", (e) => e.preventDefault());
+  const setDrawnColor = (key, v) => {
+    const d = drawnOf();
+    if (!d) return;
+    d.style[key] = v;
+    renderTray();
+    save();
+  };
+  for (const key of Object.keys(DEFAULT_DRAWN_STYLE)) {
+    const picker = $(`[data-dcolor="${key}"]`);
+    const hex = $(`[data-dhex="${key}"]`);
+    picker.addEventListener("input", () => {
+      hex.value = picker.value;
+      setDrawnColor(key, picker.value);
+    });
+    hex.addEventListener("input", () => {
+      const v = hex.value.trim().startsWith("#") ? hex.value.trim() : `#${hex.value.trim()}`;
+      if (!HEX.test(v)) return;
+      picker.value = v;
+      setDrawnColor(key, v.toLowerCase());
+    });
+    hex.addEventListener("blur", () => (hex.value = (drawnOf()?.style || DEFAULT_DRAWN_STYLE)[key]));
+  }
+  $("#reset-dcolors").addEventListener("click", () => {
+    const d = drawnOf();
+    if (!d) return;
+    d.style = { ...DEFAULT_DRAWN_STYLE };
+    renderSlideSettings();
+    renderTray();
+    save();
+  });
+  document.addEventListener("input", (e) => {
+    const n = e.target.closest?.("[data-hook-niche]");
+    if (!n) return;
+    const a = acct();
+    if (!a) return;
+    a.hookStyle = { ...hookStyle(), niche: n.value };
+    // Keep the other copy (Find apps / Slides) and the button in step without re-rendering this box.
+    document.querySelectorAll("[data-hook-niche]").forEach((x) => x !== n && (x.value = n.value));
+    const note = hookModeNote(post());
+    document.querySelectorAll("[data-hook-mode-note]").forEach((el) => (el.textContent = note));
+    document.querySelectorAll("[data-hook-suggest]").forEach((b) => (b.disabled = !post() || ui.hooking || needsHookNiche()));
+    save();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.closest?.("[data-hook-niche]")) {
+      e.preventDefault();
+      suggestHooks();
+    }
+  });
   document.addEventListener("click", (e) => {
+    const mode = e.target.closest("[data-hook-mode]");
+    if (mode) {
+      setHookStyle({ mode: mode.dataset.hookMode });
+      if (mode.dataset.hookMode === "niche") mode.closest(".hook-style")?.querySelector("[data-hook-niche]")?.focus();
+      return;
+    }
     if (e.target.closest("[data-hook-suggest]")) return suggestHooks();
     if (e.target.closest("[data-hook-clear]")) return clearHooks();
     if (e.target.closest("[data-hook-save]")) return saveCurrentHook();
@@ -1048,8 +1624,13 @@ function renderMine() {
   $("#mine-cancel").hidden = !app;
   $("#mine-remove").hidden = !app;
   const off = !!post()?.skipMine;
+  const drawnMode = isDrawn();
   $("#mine-app").classList.toggle("is-off", off);
-  $("#mine-pos").hidden = off;
+  // In the drawings format the app is always the last slide, so there's no position to pick.
+  $("#mine-pos").hidden = off || drawnMode;
+  $(".mine-hint").textContent = drawnMode
+    ? "Each post ends with a slide about it."
+    : "Goes into every post for this account, alongside the gems.";
   $("#mine-off").hidden = !off;
   $("#mine-skip").textContent = off ? "Add back to this post" : "Leave out of this post";
   $("#mine-find").disabled = m.searching;
@@ -1111,6 +1692,25 @@ function setMine(app) {
   if (dropped.length) toast(`Removed ${dropped.map((d) => d.trackName).join(", ")} to make room for your app`);
 }
 
+/** Leaves the account's app out of the current post, or puts it back. */
+function toggleSkipMine() {
+  const p = post();
+  const a = acct();
+  if (!p || !a?.myApp) return;
+  let dropped = [];
+  if (p.skipMine) {
+    delete p.skipMine;
+    // Back in: make room the same way picking a new app does.
+    p.picked = p.picked.filter((x) => x.trackId !== a.myApp.trackId);
+    dropped = p.picked.splice(gemCapacity());
+  } else {
+    p.skipMine = true;
+  }
+  renderAll();
+  save();
+  if (dropped.length) toast(`Removed ${dropped.map((d) => d.trackName).join(", ")} to make room for your app`);
+}
+
 function bindMine() {
   $("#mine-form").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -1131,23 +1731,7 @@ function bindMine() {
     ui.mine = { editing: false, searching: false, results: [] };
     renderMine();
   });
-  $("#mine-skip").addEventListener("click", () => {
-    const p = post();
-    const a = acct();
-    if (!p || !a?.myApp) return;
-    let dropped = [];
-    if (p.skipMine) {
-      delete p.skipMine;
-      // Back in: make room the same way picking a new app does.
-      p.picked = p.picked.filter((x) => x.trackId !== a.myApp.trackId);
-      dropped = p.picked.splice(gemCapacity());
-    } else {
-      p.skipMine = true;
-    }
-    renderAll();
-    save();
-    if (dropped.length) toast(`Removed ${dropped.map((d) => d.trackName).join(", ")} to make room for your app`);
-  });
+  $("#mine-skip").addEventListener("click", toggleSkipMine);
   $("#mine-remove").addEventListener("click", () => {
     const a = acct();
     if (!a) return;
@@ -1167,8 +1751,9 @@ function bindMine() {
   });
 }
 
-/* ---------- Caption + Buffer ---------- */
+/* ---------- Caption + Send to phone ---------- */
 const hookTitle = () => {
+  if (isDrawn()) return postHook(post());
   const o = opts();
   const t = [o.hookAccent, o.hookLine2, o.hookLine3].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
   return Number(o.part) > 0 ? `${t} (part ${o.part})` : t;
@@ -1180,11 +1765,68 @@ const postText = (c = post()?.caption) => {
   const tags = c.hashtags.map((t) => `#${t}`).join(" ");
   return [c.caption.trim(), tags].filter(Boolean).join("\n\n");
 };
-const bufferReady = () => {
+const r2Ready = () => {
   const s = ui.settings;
-  return !!(s && s.hasBufferKey && s.hasR2Secret && s.r2AccountId && s.r2AccessKeyId && s.r2Bucket && s.r2PublicUrl);
+  return !!(s && s.hasR2Secret && s.r2AccountId && s.r2AccessKeyId && s.r2Bucket && s.r2PublicUrl);
 };
-const channelLabel = (c) => `${c.displayName || c.name} (${c.service})${c.isDisconnected ? ", disconnected" : ""}`;
+const postTitle = (p) => p.caption.title.trim() || hookTitle();
+/** What the phone page shows besides the slides, to tell when it's out of date. */
+const phoneText = (p) => JSON.stringify([postTitle(p), postText(p.caption)]);
+/** "new" when the slides changed since they were sent, "text" when only the caption or title did. */
+function phoneStale(p) {
+  if (!p.phone) return null;
+  if (p.phone.renderedAt !== p.slides?.renderedAt) return "new";
+  return p.phone.text !== phoneText(p) ? "text" : null;
+}
+
+function renderPhone(p) {
+  const ready = r2Ready();
+  $("#phone-needs").hidden = ready;
+  $("#phone-send").hidden = !ready;
+  if (!ready) return;
+  const ph = p.phone;
+  const stale = phoneStale(p);
+  const btn = $("#phone-btn");
+  btn.hidden = !!ph && !stale;
+  btn.disabled = ui.post.sending;
+  btn.textContent = ui.post.sending
+    ? stale === "text" ? "Updating" : "Uploading slides"
+    : stale === "new" ? "Send new slides" : stale === "text" ? "Update phone page" : "Send to phone";
+  $("#phone-copy").hidden = $("#phone-open").hidden = !ph;
+  $("#phone-state").textContent = !ph
+    ? ""
+    : stale === "new"
+      ? "You've remade the slides since sending them. Send them again for a new link."
+      : stale === "text"
+        ? "The caption or title changed since you sent it. Update the page to keep the same link."
+        : `Sent ${fmtWhen(ph.sentAt)}. Scan the code with your phone's camera.`;
+
+  const qr = $("#phone-qr");
+  qr.hidden = !ph;
+  if (ph && ui.qr.url !== ph.url) {
+    ui.qr = { url: ph.url, svg: "" };
+    invoke("qr_code", { text: ph.url }).then(
+      (svg) => {
+        if (ui.qr.url !== ph.url) return;
+        ui.qr.svg = svg;
+        renderPost();
+      },
+      (e) => toast(`Couldn't draw the QR code: ${e}`, true),
+    );
+  }
+  // Generated locally from our own link, so it's safe to put in as markup.
+  if (ph && qr.dataset.url !== ph.url) {
+    qr.innerHTML = ui.qr.svg;
+    qr.dataset.url = ui.qr.svg ? ph.url : "";
+  }
+  qr.classList.toggle("is-stale", stale === "new");
+
+  const posted = $("#phone-posted");
+  posted.hidden = !ph && !p.posted;
+  posted.innerHTML = p.posted
+    ? `<span class="status status-sent">Posted</span> <span>${esc(fmtWhen(p.posted.at))}</span> <button type="button" class="link" id="unmark-posted">Undo</button>`
+    : `<button type="button" class="btn btn-quiet" id="mark-posted">Mark as posted</button>`;
+}
 
 function renderPost() {
   const p = post();
@@ -1204,53 +1846,30 @@ function renderPost() {
   $("#tag-count").classList.toggle("is-over", n > MAX_HASHTAGS);
 
   const write = $("#write-caption");
-  write.disabled = ui.post.writing || !slideApps().length;
+  write.disabled = ui.post.writing || !(isDrawn(p) ? drawnSlides(p).some((s) => s.text.trim()) : slideApps().length);
   write.textContent = ui.post.writing ? `${WRITER_NAMES[state.writer]} is writing` : c.caption ? "Rewrite caption" : "Write caption";
   $("#copy-caption").disabled = !postText();
-
-  // Already scheduled: show where it stands instead of the form, so it isn't sent to Buffer twice.
-  const sched = p.buffer;
-  $("#post-scheduled").hidden = !sched;
-  if (sched) {
-    const st = postStatus(p);
-    $("#post-scheduled-text").innerHTML = `<span class="status ${st.cls}">${esc(st.label)}</span> Reminder for ${esc(fmtWhen(sched.dueAt))} on ${esc(handle(acct()))}.`;
-  }
-
-  const ready = bufferReady();
-  $("#schedule-form").hidden = !ready || !!sched;
-  $("#schedule-needs").hidden = ready || !!sched;
-  if (!ready || sched) return;
-  if (ui.post.channels === null && !ui.post.loadingChannels) loadChannels();
-
-  const a = acct();
-  const sel = $("#post-channel");
-  const chans = ui.post.channels || [];
-  if (a && !a.channelId && chans.length) {
-    // Suggest the Buffer account whose name matches the username.
-    const match = chans.find((ch) => (ch.name || "").toLowerCase() === a.username.toLowerCase());
-    if (match) Object.assign(a, { channelId: match.id, channelName: match.displayName || match.name });
-  }
-  sel.innerHTML = ui.post.loadingChannels
-    ? `<option>Loading accounts</option>`
-    : `<option value="">Choose the Buffer account</option>` +
-      chans.map((ch) => `<option value="${esc(ch.id)}" ${ch.id === a?.channelId ? "selected" : ""}>${esc(channelLabel(ch))}</option>`).join("");
-  sel.disabled = ui.post.loadingChannels || !chans.length;
-  $("#load-channels").disabled = ui.post.loadingChannels;
-  $("#channel-hint").textContent = chans.length || ui.post.loadingChannels ? `Saved for ${handle(a)}, so later posts use it too.` : "No accounts found in Buffer. Connect TikTok there first.";
-
-  const btn = $("#schedule-btn");
-  btn.disabled = ui.post.scheduling || !a?.channelId || !$("#post-when").value;
-  btn.textContent = ui.post.scheduling ? "Uploading slides and scheduling" : "Schedule reminder";
+  renderPhone(p);
 }
 
 async function writeCaption() {
   const p = post();
   const apps = slideApps();
-  if (!p || !apps.length || ui.post.writing) return;
+  const texts = drawnSlides(p).map((s) => s.text).filter((t) => t.trim());
+  if (!p || ui.post.writing || !(isDrawn(p) ? texts.length : apps.length)) return;
   ui.post.writing = true;
   renderPost();
   try {
-    const c = await invoke("generate_caption", { niche: p.niche, apps, writer: state.writer });
+    const c = isDrawn(p)
+      ? await invoke("generate_drawn_caption", { topic: drawnOf(p).topic || "", slides: texts, writer: state.writer })
+      : await invoke("generate_caption", {
+          // The hook and the picked apps set the theme. The search box may still hold another post's niche, so it's only a hint.
+          hook: hookTitle(),
+          niche: p.niche || "",
+          apps,
+          ownAppId: ownAppOf(p)?.trackId ?? null,
+          writer: state.writer,
+        });
     p.caption.caption = c.caption;
     p.caption.hashtags = c.hashtags;
     save();
@@ -1262,76 +1881,46 @@ async function writeCaption() {
   }
 }
 
-async function loadChannels() {
-  ui.post.loadingChannels = true;
-  renderPost();
-  if (ui.view === "board") renderBoard();
-  try {
-    const list = await invoke("buffer_channels");
-    // TikTok accounts first.
-    ui.post.channels = list.sort((a, b) => (b.service === "tiktok") - (a.service === "tiktok"));
-  } catch (e) {
-    ui.post.channels = [];
-    toast(`Couldn't load your Buffer accounts: ${e}`, true);
-  } finally {
-    ui.post.loadingChannels = false;
-    renderPost();
-    if (ui.view === "board") renderBoard();
-  }
-}
-
-async function schedulePost() {
+/** Uploads the slides and phone page, or just refreshes the page when only the caption or title changed. */
+async function sendToPhone() {
   const p = post();
-  const a = acct();
-  const when = $("#post-when").value;
-  if (!p?.slides || !a?.channelId || !when || ui.post.scheduling) return;
-  const due = new Date(when);
-  if (!(due > new Date())) return toast("Pick a reminder time in the future.", true);
+  if (!p?.slides || ui.post.sending) return;
   if (p.caption.hashtags.length > MAX_HASHTAGS) return toast(`TikTok allows ${MAX_HASHTAGS} hashtags. Remove a few first.`, true);
-  ui.post.scheduling = true;
+  const textOnly = phoneStale(p) === "text";
+  const renderedAt = p.slides.renderedAt;
+  const text = phoneText(p);
+  ui.post.sending = true;
   renderPost();
   try {
-    const out = await invoke("schedule_post", {
+    const out = await invoke("send_to_phone", {
       slides: p.slides.slides,
-      channelId: a.channelId,
+      name: p.name,
+      account: handle(accountOf(p)),
+      title: postTitle(p),
       caption: { caption: p.caption.caption, hashtags: p.caption.hashtags },
-      title: p.caption.title.trim() || hookTitle(),
-      dueAt: due.toISOString(),
+      folder: textOnly ? p.phone.folder : null,
+      images: !textOnly,
     });
-    p.buffer = {
-      id: out.post.id,
-      status: out.post.status || "scheduled",
-      dueAt: out.post.dueAt || due.toISOString(),
-      channelId: a.channelId,
-      imageUrls: out.imageUrls,
-    };
+    p.phone = { folder: out.folder, url: out.url, sentAt: textOnly ? p.phone.sentAt : Date.now(), renderedAt, text };
+    // Already have the code for this link.
+    ui.qr = { url: out.url, svg: out.qr };
     save();
-    toast(`Scheduled a reminder for ${fmtWhen(p.buffer.dueAt)} on ${handle(a)}`);
+    toast(textOnly ? "Updated the phone page. Same link and code." : "Sent. Scan the code with your phone.");
   } catch (e) {
-    toast(`Couldn't schedule on Buffer: ${e}`, true);
+    toast(`Couldn't send to your phone: ${e}`, true);
   } finally {
-    ui.post.scheduling = false;
+    ui.post.sending = false;
     renderAll();
+    renderPost();
   }
 }
 
-async function refreshPosts() {
-  if (ui.post.refreshing) return;
-  ui.post.refreshing = true;
-  renderBoard();
-  let failed = 0;
-  for (const p of state.posts.filter((p) => p.buffer && p.buffer.status !== "sent")) {
-    try {
-      const fresh = await invoke("refresh_post", { id: p.buffer.id });
-      Object.assign(p.buffer, { status: fresh.status, dueAt: fresh.dueAt || p.buffer.dueAt, sentAt: fresh.sentAt, externalLink: fresh.externalLink || p.buffer.externalLink });
-    } catch {
-      failed++;
-    }
-  }
-  ui.post.refreshing = false;
+function setPosted(on) {
+  const p = post();
+  if (!p) return;
+  p.posted = on ? { at: Date.now() } : null;
   save();
-  renderAll();
-  if (failed) toast(`Couldn't refresh ${failed} post${failed > 1 ? "s" : ""}. Check your Buffer key in Settings.`, true);
+  renderPost();
 }
 
 function bindPost() {
@@ -1341,10 +1930,14 @@ function bindPost() {
     fn(p, e.target.value);
     save();
   };
-  $("#post-title").addEventListener("input", edit((p, v) => (p.caption.title = v)));
+  $("#post-title").addEventListener("input", edit((p, v) => {
+    p.caption.title = v;
+    renderPhone(p);
+  }));
   $("#post-caption").addEventListener("input", edit((p, v) => {
     p.caption.caption = v;
     $("#copy-caption").disabled = !postText();
+    renderPhone(p);
   }));
   $("#post-tags").addEventListener("input", edit((p, v) => {
     p.caption.hashtags = parseTags(v);
@@ -1358,19 +1951,19 @@ function bindPost() {
       (e) => toast(`Couldn't copy: ${e}`, true),
     ),
   );
-  $("#post-channel").addEventListener("change", (e) => {
-    const a = acct();
-    if (!a) return;
-    const ch = (ui.post.channels || []).find((c) => c.id === e.target.value);
-    a.channelId = e.target.value;
-    a.channelName = ch ? ch.displayName || ch.name : "";
-    renderPost();
-    save();
+  $("#phone-btn").addEventListener("click", sendToPhone);
+  $("#phone-copy").addEventListener("click", () => {
+    const url = post()?.phone?.url;
+    if (url) navigator.clipboard.writeText(url).then(() => toast("Link copied"), (e) => toast(`Couldn't copy: ${e}`, true));
   });
-  $("#post-when").addEventListener("input", renderPost);
-  $("#load-channels").addEventListener("click", loadChannels);
-  $("#schedule-btn").addEventListener("click", schedulePost);
-  $("#refresh-post").addEventListener("click", refreshPosts);
+  $("#phone-open").addEventListener("click", () => {
+    const url = post()?.phone?.url;
+    if (url) window.__TAURI__.opener.openUrl(url).catch((e) => toast(`Couldn't open the link: ${e}`, true));
+  });
+  $("#phone-posted").addEventListener("click", (e) => {
+    if (e.target.closest("#mark-posted")) setPosted(true);
+    else if (e.target.closest("#unmark-posted")) setPosted(false);
+  });
   document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.goto)));
   $("#post-name").addEventListener("input", (e) => {
     const p = post();
@@ -1534,7 +2127,7 @@ function linkFor(p, videoId, linkedBy) {
     postId: p.id,
     username: a?.username || "",
     postName: p.name,
-    hook: hookText(p.slideOptions),
+    hook: postHook(p),
     apps: lineupFor(p).map((x) => x.trackName),
     myApp: ownAppOf(p)?.trackName || null,
     myAppSlot: ownAppOf(p) ? a.myAppSlot || 3 : null,
@@ -1552,14 +2145,15 @@ function overlap(a, b) {
 }
 
 /**
- * Links scheduled posts to the TikTok posts they became. Buffer's link to the published post is
- * used when it has one; otherwise the TikTok post closest to the reminder time, if its caption
- * matches or it went out within 12 hours. Posts you unlinked by hand are left alone.
+ * Links posts you sent to your phone (or marked posted) to the TikTok posts they became. A saved
+ * link to the published post (from the Buffer days) is used when there is one; otherwise the
+ * TikTok post closest to when you marked it posted (or sent it), if its caption matches or it
+ * went out within 12 hours. Posts you unlinked by hand are left alone.
  */
 async function autoLink(a, videos) {
   const taken = new Set(videos.filter((v) => v.link).map((v) => v.link.postId));
   const free = () => videos.filter((v) => !v.link);
-  const candidates = postsOf(a).filter((p) => p.buffer && !p.noAutoLink && !taken.has(p.id));
+  const candidates = postsOf(a).filter((p) => (p.posted || p.phone) && !p.noAutoLink && !taken.has(p.id));
   const links = [];
   const claim = (p, v) => {
     links.push(linkFor(p, v.id, "auto"));
@@ -1567,13 +2161,13 @@ async function autoLink(a, videos) {
     taken.add(p.id);
   };
   for (const p of candidates) {
-    const id = videoIdFromUrl(p.buffer.externalLink);
+    const id = videoIdFromUrl(p.posted?.link);
     const v = id && free().find((x) => x.id === id);
     if (v) claim(p, v);
   }
   const pairs = [];
   for (const p of candidates.filter((p) => !taken.has(p.id))) {
-    const due = Date.parse(p.buffer.sentAt || p.buffer.dueAt);
+    const due = p.posted?.at || p.phone?.sentAt;
     if (!due) continue;
     const text = postText(p.caption);
     for (const v of free()) {
@@ -1811,7 +2405,7 @@ function renderPostTable(a, videos) {
           <label class="an-link-pick">OpenUGC post
             <select data-link-video="${esc(v.id)}">
               <option value="">Not linked</option>
-              ${posts.map((p) => `<option value="${esc(p.id)}" ${link?.id === p.id ? "selected" : ""}>${esc(p.name)}${p.buffer?.dueAt ? `, ${esc(fmtDay(Date.parse(p.buffer.dueAt)))}` : ""}</option>`).join("")}
+              ${posts.map((p) => `<option value="${esc(p.id)}" ${link?.id === p.id ? "selected" : ""}>${esc(p.name)}${p.posted || p.phone ? `, ${esc(fmtDay(p.posted?.at || p.phone.sentAt))}` : ""}</option>`).join("")}
             </select>
           </label>
           ${link ? `<button type="button" class="btn btn-quiet" data-open-post="${esc(link.id)}">Open ${esc(link.name)}</button>` : ""}
@@ -1883,7 +2477,6 @@ function renderSettings() {
   document.querySelectorAll("[data-s]").forEach((el) => {
     if (document.activeElement !== el) el.value = s[el.dataset.s] || "";
   });
-  $("#set-buffer-key").placeholder = s.hasBufferKey ? SAVED_HINT : "";
   $("#set-r2-secret").placeholder = s.hasR2Secret ? SAVED_HINT : "";
   $("#set-metrics-token").placeholder = s.hasMetricsToken ? SAVED_HINT : "";
 }
@@ -1891,16 +2484,13 @@ function renderSettings() {
 async function saveSettings({ quiet = false } = {}) {
   const settings = {};
   document.querySelectorAll("[data-s]").forEach((el) => (settings[el.dataset.s] = el.value.trim()));
-  const bufferKey = $("#set-buffer-key").value.trim() || null;
   const r2Secret = $("#set-r2-secret").value.trim() || null;
   const metricsToken = $("#set-metrics-token").value.trim() || null;
   try {
-    ui.settings = await invoke("save_settings", { settings, bufferKey, r2Secret, metricsToken });
-    $("#set-buffer-key").value = "";
+    ui.settings = await invoke("save_settings", { settings, r2Secret, metricsToken });
     $("#set-r2-secret").value = "";
     $("#set-metrics-token").value = "";
     syncProfiles();
-    if (bufferKey) ui.post.channels = null;
     renderSettings();
     renderPost();
     if (!quiet) toast("Settings saved");
@@ -1937,7 +2527,7 @@ const fromB64 = (b64) => new TextDecoder().decode(Uint8Array.from(atob(b64), (c)
 async function copySettingsCode() {
   try {
     const exp = await invoke("export_settings");
-    // Accounts come along (usernames, Buffer links, the app each promotes); posts stay, since their files are local.
+    // Accounts come along (usernames, formats, the app each promotes); posts stay, since their files are local.
     const bundle = { ...exp, prefs: { writer: state.writer, filter: state.filter, accounts: state.accounts } };
     await navigator.clipboard.writeText(CODE_PREFIX + toB64(JSON.stringify(bundle)));
     toast("Settings code copied. It contains your keys, so keep it private.");
@@ -1959,7 +2549,6 @@ async function importSettingsCode() {
   try {
     ui.settings = await invoke("save_settings", {
       settings: b.settings || {},
-      bufferKey: b.bufferKey || null,
       r2Secret: b.r2Secret || null,
       metricsToken: b.metricsToken || null,
     });
@@ -1981,7 +2570,10 @@ async function importSettingsCode() {
     }
     // Codes from before accounts existed carry a single app.
     if (prefs.myApp) for (const a of state.accounts) if (!a.myApp) Object.assign(a, { myApp: prefs.myApp, myAppSlot: prefs.myAppSlot || 3 });
-    ui.post.channels = null;
+    for (const a of state.accounts) {
+    delete a.channelId;
+    delete a.channelName;
+  }
     $("#import-code").value = "";
     document.querySelectorAll("[data-f]").forEach((input) => (input.value = state.filter[input.dataset.f]));
     save();
@@ -1999,15 +2591,6 @@ function bindSettings() {
     e.preventDefault();
     saveSettings();
   });
-  const cb = $("#check-buffer");
-  cb.addEventListener("click", () =>
-    runCheck(cb, "Check Buffer", async () => {
-      const list = await invoke("buffer_channels");
-      ui.post.channels = list.sort((a, b) => (b.service === "tiktok") - (a.service === "tiktok"));
-      const tiktok = list.filter((c) => c.service === "tiktok").length;
-      return `Buffer works. Found ${list.length} account${list.length === 1 ? "" : "s"}, ${tiktok} on TikTok.`;
-    }),
-  );
   const cr = $("#check-r2");
   cr.addEventListener("click", () =>
     runCheck(cr, "Check R2", async () => `R2 works. Uploaded a test file and loaded it from ${await invoke("check_r2")}`),
@@ -2027,6 +2610,7 @@ function bindSettings() {
 /* ---------- wiring ---------- */
 function renderWriter() {
   document.querySelectorAll("[data-writer]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.writer === state.writer)));
+  document.querySelectorAll("[data-artist]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.artist === state.artist)));
 }
 
 function renderAll() {
@@ -2037,6 +2621,7 @@ function renderAll() {
   renderResults();
   renderTray();
   renderPrepared();
+  renderWrite();
   if (ui.view === "board") renderBoard();
   renderAnalytics();
 }
@@ -2061,11 +2646,17 @@ function bind() {
     const b = e.target.closest("[data-pick]");
     if (b) togglePick(Number(b.dataset.pick));
   });
-  $("#home-grid").addEventListener("click", (e) => {
-    const b = e.target.closest("[data-unpick]");
-    if (b) togglePick(Number(b.dataset.unpick));
-  });
-  $("#prepare-btn").addEventListener("click", prepareAll);
+  bindSlotMenu();
+  $("#prepare-btn").addEventListener("click", () => (isDrawn() ? drawAll() : prepareAll()));
+  document.querySelectorAll("[data-artist]").forEach((b) =>
+    b.addEventListener("click", () => {
+      state.artist = b.dataset.artist;
+      renderWriter();
+      renderTray();
+      renderWrite();
+      save();
+    }),
+  );
   document.querySelectorAll("[data-writer]").forEach((b) =>
     b.addEventListener("click", () => {
       state.writer = b.dataset.writer;
@@ -2105,8 +2696,6 @@ function migrate(saved) {
     s.accounts.push({
       id: accountId,
       username: "",
-      channelId: saved.channelId || "",
-      channelName: "",
       myApp: saved.myApp || null,
       myAppSlot: saved.myAppSlot || 3,
       createdAt: Date.now(),
@@ -2144,7 +2733,30 @@ async function init() {
     p.slideOptions = { ...DEFAULT_SLIDE_OPTIONS, ...(p.slideOptions || {}) };
     p.caption = { title: "", caption: "", hashtags: [], ...(p.caption || {}) };
     p.picked = p.picked || [];
+    // Buffer is gone: keep when a post went out (and its TikTok link) for analytics, drop the rest.
+    if (p.buffer) {
+      if (p.buffer.status === "sent" && !p.posted) p.posted = { at: Date.parse(p.buffer.sentAt || p.buffer.dueAt) || Date.now(), link: p.buffer.externalLink || undefined };
+      delete p.buffer;
+    }
+    p.phone = p.phone || null;
+    p.posted = p.posted || null;
+    if (p.format === "drawn") {
+      const d = p.drawn || {};
+      p.drawn = {
+        topic: d.topic || "",
+        points: d.points || DEFAULT_POINTS,
+        accent: d.accent || "",
+        slides: (d.slides || []).map((s) => ({ ...newDrawnSlide(s), id: s.id || uid() })),
+        plug: d.plug ? { ...newDrawnSlide(d.plug), id: d.plug.id || uid() } : null,
+        style: { ...DEFAULT_DRAWN_STYLE, ...(d.style || {}) },
+      };
+    }
   }
+  for (const a of state.accounts) {
+    delete a.channelId;
+    delete a.channelName;
+  }
+  if (!WRITER_NAMES[state.artist]) state.artist = "codex";
   if (!post()) state.currentPostId = null;
   try {
     ui.settings = await invoke("get_settings");
@@ -2154,6 +2766,7 @@ async function init() {
   bind();
   bindBoard();
   bindSlides();
+  bindWrite();
   bindMine();
   bindPost();
   bindSettings();

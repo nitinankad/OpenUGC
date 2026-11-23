@@ -1,5 +1,5 @@
-//! Uploads slides to Cloudflare R2 (S3-compatible API, signature v4) so Buffer can fetch
-//! them from a public URL. Buffer has no upload endpoint of its own.
+//! Uploads slides and phone pages to Cloudflare R2 (S3-compatible API, signature v4), so a
+//! phone can load them from the bucket's public URL.
 
 use crate::settings::{self, Settings};
 use anyhow::{bail, Context, Result};
@@ -39,13 +39,13 @@ impl R2 {
         })
     }
 
-    /// Uploads bytes and returns their public URL.
-    pub fn upload_bytes(&self, key: &str, body: Vec<u8>, content_type: &str) -> Result<String> {
-        self.put(key, body, content_type)?;
+    /// Uploads bytes and returns their public URL. `cache_control` is sent back to browsers as is.
+    pub fn upload_bytes(&self, key: &str, body: Vec<u8>, content_type: &str, cache_control: &str) -> Result<String> {
+        self.put(key, body, content_type, cache_control)?;
         Ok(format!("{}/{}", self.public_url, key))
     }
 
-    fn put(&self, key: &str, body: Vec<u8>, content_type: &str) -> Result<()> {
+    fn put(&self, key: &str, body: Vec<u8>, content_type: &str, cache_control: &str) -> Result<()> {
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c)) {
             bail!("Unsupported characters in object key {key}");
         }
@@ -56,9 +56,9 @@ impl R2 {
         let date = now.format("%Y%m%d").to_string();
         let payload_hash = hex::encode(Sha256::digest(&body));
 
-        let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
+        let signed_headers = "cache-control;content-type;host;x-amz-content-sha256;x-amz-date";
         let canonical = format!(
-            "PUT\n{path}\n\ncontent-type:{content_type}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n\n{signed_headers}\n{payload_hash}"
+            "PUT\n{path}\n\ncache-control:{cache_control}\ncontent-type:{content_type}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n\n{signed_headers}\n{payload_hash}"
         );
         let scope = format!("{date}/auto/s3/aws4_request");
         let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
@@ -73,6 +73,7 @@ impl R2 {
             .timeout(std::time::Duration::from_secs(120))
             .build()?
             .put(format!("https://{host}{path}"))
+            .header("cache-control", cache_control)
             .header("content-type", content_type)
             .header("x-amz-content-sha256", &payload_hash)
             .header("x-amz-date", &amz_date)
@@ -93,7 +94,7 @@ impl R2 {
     /// Uploads a tiny file and fetches it back through the public URL, to check the whole setup.
     pub fn check(&self) -> Result<String> {
         let key = "openugc/connection-check.txt";
-        self.put(key, b"ok".to_vec(), "text/plain")?;
+        self.put(key, b"ok".to_vec(), "text/plain", "no-cache")?;
         let url = format!("{}/{}", self.public_url, key);
         let resp = reqwest::blocking::get(&url).with_context(|| format!("Uploaded, but couldn't fetch {url}"))?;
         if !resp.status().is_success() {

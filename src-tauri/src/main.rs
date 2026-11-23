@@ -2,10 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod appstore;
-mod buffer;
 mod caption;
+mod drawn;
 mod hooks;
 mod metrics;
+mod phone;
 mod prepare;
 mod r2;
 mod settings;
@@ -15,7 +16,6 @@ mod suggest;
 use appstore::{AppInfo, GemFilter};
 use caption::Caption;
 use prepare::{PreparedApp, Writer};
-use serde::Serialize;
 use slides::{RenderedSlideshow, SlideOptions};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -84,12 +84,24 @@ async fn render_slides(app: AppHandle, apps: Vec<PreparedApp>, options: SlideOpt
 }
 
 #[tauri::command]
-async fn generate_caption(niche: String, apps: Vec<PreparedApp>, writer: Writer) -> CmdResult<Caption> {
-    blocking(move || caption::generate_caption(&niche, &apps, writer)).await
+async fn generate_caption(
+    hook: Option<String>,
+    niche: String,
+    apps: Vec<PreparedApp>,
+    own_app_id: Option<u64>,
+    writer: Writer,
+) -> CmdResult<Caption> {
+    blocking(move || {
+        let hook = hook.unwrap_or_default();
+        let brief = caption::CaptionBrief { hook: &hook, niche: &niche, apps: &apps, own_app_id };
+        caption::generate_caption(&brief, writer)
+    })
+    .await
 }
 
 #[tauri::command]
 async fn suggest_hooks(
+    style: Option<hooks::HookStyle>,
     niche: String,
     own_app: Option<AppInfo>,
     apps: Vec<PreparedApp>,
@@ -98,10 +110,66 @@ async fn suggest_hooks(
     writer: Writer,
 ) -> CmdResult<Vec<hooks::Hook>> {
     blocking(move || {
-        let brief = hooks::HookBrief { niche: &niche, own_app: own_app.as_ref(), apps: &apps, count, used: &used, how_many: 8 };
+        let brief = hooks::HookBrief { style: style.unwrap_or_default(), niche: &niche, own_app: own_app.as_ref(), apps: &apps, count, used: &used, how_many: 8 };
         hooks::suggest_hooks(&brief, writer)
     })
     .await
+}
+
+#[tauri::command]
+async fn write_drawn(topic: String, points: usize, own_app: Option<AppInfo>, used: Vec<String>, writer: Writer) -> CmdResult<drawn::Script> {
+    blocking(move || {
+        let brief = drawn::WriteBrief { topic: &topic, points: points.clamp(3, 9), own_app: own_app.as_ref(), used: &used };
+        drawn::write_script(&brief, writer)
+    })
+    .await
+}
+
+/// Draws one scene with Codex (image generation) or Claude (SVG) and returns the saved PNG.
+#[tauri::command]
+async fn draw_scene(app: AppHandle, scene: String, artist: Writer, style_ref: Option<PathBuf>) -> CmdResult<PathBuf> {
+    let dir = data_dir(&app)?.join("drawings");
+    blocking(move || drawn::draw(&scene, artist, style_ref.as_deref(), &dir)).await
+}
+
+#[tauri::command]
+async fn render_drawn(
+    app: AppHandle,
+    slides: Vec<drawn::DrawnSlide>,
+    accent: String,
+    plug: Option<drawn::DrawnSlide>,
+    plug_app: Option<AppInfo>,
+    style: slides::DrawnStyle,
+) -> CmdResult<RenderedSlideshow> {
+    let root = data_dir(&app)?;
+    let stamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string();
+    let dir = root.join("slideshows").join(stamp);
+    blocking(move || {
+        // The plug shows the app's icon; fetch it once into the shared app folder.
+        let icon = match &plug_app {
+            Some(a) => match appstore::hires_icon(a) {
+                Some(url) => {
+                    let folder = root.join("apps").join(a.track_id.to_string());
+                    std::fs::create_dir_all(&folder)?;
+                    let client = reqwest::blocking::Client::builder().user_agent("OpenUGC/0.1").timeout(std::time::Duration::from_secs(60)).build()?;
+                    prepare::download(&client, &url, &folder.join("icon.png")).ok()
+                }
+                None => None,
+            },
+            None => None,
+        };
+        let plug = match (&plug, &plug_app) {
+            (Some(s), Some(a)) => Some((s, slides::PlugApp { name: &a.track_name, icon: icon.as_deref() })),
+            _ => None,
+        };
+        slides::render_drawn(&slides, &accent, plug, &style, &dir)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn generate_drawn_caption(topic: String, slides: Vec<String>, writer: Writer) -> CmdResult<Caption> {
+    blocking(move || caption::generate_drawn_caption(&topic, &slides, writer)).await
 }
 
 #[tauri::command]
@@ -114,12 +182,11 @@ fn get_settings(app: AppHandle) -> CmdResult<settings::SettingsView> {
 fn save_settings(
     app: AppHandle,
     settings: settings::Settings,
-    buffer_key: Option<String>,
     r2_secret: Option<String>,
     metrics_token: Option<String>,
 ) -> CmdResult<settings::SettingsView> {
     let dir = data_dir(&app)?;
-    settings::save(&dir, &settings, buffer_key, r2_secret, metrics_token).map_err(|e| format!("{e:#}"))?;
+    settings::save(&dir, &settings, r2_secret, metrics_token).map_err(|e| format!("{e:#}"))?;
     Ok(settings::view(&dir))
 }
 
@@ -135,54 +202,41 @@ async fn check_r2(app: AppHandle) -> CmdResult<String> {
     blocking(move || r2::R2::from_settings(&s)?.check()).await
 }
 
+/// Uploads the slides and a save-to-phone page to R2. Pass the earlier `folder` with
+/// `images: false` to just refresh the page's caption and title.
 #[tauri::command]
-async fn buffer_channels() -> CmdResult<Vec<buffer::Channel>> {
-    blocking(|| buffer::channels(&settings::buffer_key()?)).await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Scheduled {
-    post: buffer::BufferPost,
-    image_urls: Vec<String>,
-}
-
-/// Uploads the slides to R2, then creates a Buffer reminder post for `due_at` (ISO 8601, UTC).
-#[tauri::command]
-async fn schedule_post(
+#[allow(clippy::too_many_arguments)]
+async fn send_to_phone(
     app: AppHandle,
     slides: Vec<PathBuf>,
-    channel_id: String,
-    caption: Caption,
+    name: String,
+    account: String,
     title: String,
-    due_at: String,
-) -> CmdResult<Scheduled> {
+    caption: Caption,
+    folder: Option<String>,
+    images: bool,
+) -> CmdResult<phone::PhonePage> {
     let s = settings::load(&data_dir(&app)?);
     blocking(move || {
-        let key = settings::buffer_key()?;
         let store = r2::R2::from_settings(&s)?;
-        let mut image_urls = Vec::new();
-        for path in &slides {
-            let folder = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("slides");
-            let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("slide.jpg");
-            let safe = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '-' }).collect::<String>();
-            // TikTok caps photos at ~2 MP, so upload a 1080-wide copy of each slide.
-            let bytes = slides::tiktok_jpeg(path)?;
-            image_urls.push(store.upload_bytes(&format!("openugc/{}/tiktok-{}", safe(folder), safe(file)), bytes, "image/jpeg")?);
-        }
         let text = caption::post_text(&caption);
-        let post = buffer::create_post(
-            &key,
-            &buffer::NewPost { channel_id: &channel_id, text: &text, title: &title, image_urls: &image_urls, due_at: &due_at },
-        )?;
-        Ok(Scheduled { post, image_urls })
+        let upload = phone::Upload {
+            slides: &slides,
+            name: &name,
+            account: &account,
+            title: &title,
+            caption: &text,
+            folder: folder.as_deref(),
+            images,
+        };
+        phone::send(&store, &upload)
     })
     .await
 }
 
 #[tauri::command]
-async fn refresh_post(id: String) -> CmdResult<buffer::BufferPost> {
-    blocking(move || buffer::get_post(&settings::buffer_key()?, &id)).await
+fn qr_code(text: String) -> CmdResult<String> {
+    phone::qr_svg(&text).map_err(|e| format!("{e:#}"))
 }
 
 /// A request to the analytics Worker, e.g. ("GET", "/videos?username=x", None).
@@ -223,13 +277,16 @@ fn main() {
             render_slides,
             generate_caption,
             suggest_hooks,
+            write_drawn,
+            draw_scene,
+            render_drawn,
+            generate_drawn_caption,
             get_settings,
             save_settings,
             export_settings,
             check_r2,
-            buffer_channels,
-            schedule_post,
-            refresh_post,
+            send_to_phone,
+            qr_code,
             metrics,
             load_state,
             save_state

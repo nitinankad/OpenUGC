@@ -155,6 +155,15 @@ h1 {
 .btn-ask { background: var(--emerald-tint); color: var(--emerald-deep); white-space: nowrap; }
 .btn-ask:hover:not(:disabled) { background: color-mix(in srgb, var(--emerald-tint) 70%, var(--emerald) 30%); }
 .hook-suggest { margin-bottom: 10px; }
+.hook-style { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 10px; }
+.hook-start .hook-style { margin-bottom: 0; }
+.hook-niche {
+  flex: 1 1 200px; min-width: 0; max-width: 320px; height: 34px; padding: 0 10px;
+  border: 1.5px solid var(--line); border-radius: 9px; background: transparent; color: var(--ink); font: inherit; font-size: 14px;
+}
+.hook-niche:focus { outline: none; border-color: var(--emerald); }
+.hook-niche[hidden] { display: none; }
+.hook-mode-note { flex-basis: 100%; margin: 0; }
 .hook-start { margin: 0 0 20px; max-width: 720px; display: grid; gap: 10px; }
 .hook-start-head h2 { margin: 0; font-size: 16px; font-weight: 700; }
 .hook-now { margin: 2px 0 0; font-size: 14px; color: var(--slate); }
@@ -439,7 +448,7 @@ h1 {
 .color-row input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 6px; }
 .slides-output { align-self: start; min-width: 0; }
 
-/* Post: caption + Buffer */
+/* Post: caption + send to phone */
 .post { margin-top: 30px; padding-top: 24px; border-top: 1px solid var(--line); max-width: 640px; }
 .post-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .post-head h2 { margin: 0 auto 0 0; font-size: 18px; font-weight: 700; }
@@ -447,21 +456,28 @@ h1 {
 .post .overview { max-width: none; min-height: 3lh; color: var(--ink); font-size: 15px; }
 .hint { margin: 0 0 12px; font-size: 13.5px; color: var(--slate); max-width: 62ch; }
 .inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.field select, .field input[type="datetime-local"] {
+.field select {
   height: 38px; padding: 0 10px;
   border: 1.5px solid var(--line); border-radius: 9px;
   background: transparent; color: var(--ink); font: inherit; font-size: 15px;
 }
 .field select { min-width: 240px; }
-.field input[type="datetime-local"] { width: 240px; }
 .link { all: unset; cursor: pointer; color: var(--emerald-deep); text-decoration: underline; text-underline-offset: 2px; }
 .field-note { font-size: 12.5px; color: var(--slate); }
-.scheduled-box { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: 12px; background: var(--mist); }
-.scheduled-box p { margin: 0; font-size: 14px; }
-.scheduled-box .status { margin-right: 6px; }
+/* Send to phone: QR code beside the actions. The code stays black on white in dark mode so cameras read it. */
+.phone-send { display: flex; align-items: flex-start; gap: 18px; }
+.phone-send[hidden] { display: none; }
+.phone-qr { flex: 0 0 auto; width: 156px; height: 156px; padding: 6px; border-radius: 12px; background: #fff; box-shadow: 0 0 0 1px var(--line); }
+.phone-qr svg { display: block; width: 100%; height: 100%; }
+.phone-qr.is-stale { opacity: .35; }
+.phone-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding-top: 2px; }
+.phone-state { margin: 0; font-size: 14px; color: var(--slate); max-width: 46ch; }
+.phone-state:empty { display: none; }
+.phone-posted { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--slate); }
+.phone-posted[hidden] { display: none; }
 .status { font-size: 12px; font-weight: 650; padding: 2px 9px; border-radius: 999px; background: var(--mist); color: var(--slate); white-space: nowrap; }
 .status-ready { background: var(--ready-bg); color: var(--ready-fg); }
-.status-scheduled { background: var(--emerald-tint); color: var(--emerald-deep); }
+.status-phone { background: var(--emerald-tint); color: var(--emerald-deep); }
 .status-sent { background: var(--ink); color: var(--paper); }
 .status-error { background: var(--danger); color: #fff; }
 
@@ -649,6 +665,29 @@ h1 {
 .slot.is-new .slot-icon { animation: drop-in .32s cubic-bezier(.2, 1.4, .4, 1); }
 @keyframes drop-in { from { transform: scale(.4); opacity: 0; } }
 
+/* Menu for an app on the phone */
+.ctx-menu {
+  position: fixed; z-index: 50;
+  min-width: 180px; max-width: 240px;
+  padding: 4px;
+  background: var(--paper); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+}
+.ctx-title {
+  margin: 0; padding: 6px 10px 4px;
+  font-size: 12px; color: var(--slate);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx-menu button {
+  all: unset; box-sizing: border-box; cursor: pointer;
+  display: block; width: 100%;
+  padding: 7px 10px; border-radius: 7px;
+  font-size: 13.5px;
+}
+.ctx-menu button:hover, .ctx-menu button:focus-visible { background: var(--mist); }
+.ctx-menu button.is-danger { color: var(--danger); }
+
 .tray-status { margin: 0; color: var(--slate); font-size: 13.5px; text-align: center; }
 
 /* Your app */
@@ -811,3 +850,59 @@ h1 {
 .an-detail .loading-row { padding: 12px 0; }
 .an-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .an-link-pick { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--slate); }
+
+/* ---------- Relatable drawings: Write ---------- */
+.tray [hidden], .nav-step[hidden] { display: none !important; }
+.write-form { align-items: center; }
+.write-points { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--slate); white-space: nowrap; }
+.write-points select {
+  font: inherit; color: var(--ink); height: 48px; padding: 0 10px;
+  background: var(--paper); border: 1.5px solid var(--line); border-radius: 12px;
+}
+.drawn-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 0 32px 14px; }
+.drawn-count { font-size: 13px; color: var(--slate); }
+.drawn-list { list-style: none; margin: 0; overflow-y: auto; flex: 1; padding: 0 32px 32px; }
+.dslide {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 20px;
+  padding: 20px 0;
+  border-top: 1px solid var(--line);
+}
+/* The real slide colours, even in dark mode, so the drawing looks as it will on TikTok. */
+.dslide-art {
+  aspect-ratio: 4 / 5; border-radius: 10px; border: 1px solid var(--line);
+  display: grid; place-items: center; overflow: hidden; padding: 14px;
+}
+.dslide-art img { max-width: 100%; max-height: 100%; mix-blend-mode: multiply; }
+.dslide-art .loading-row { padding: 0; gap: 8px; font-size: 13px; color: #6b6f76; }
+.dslide-noart { font-size: 12.5px; color: #8a8e95; text-align: center; }
+.dslide-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.dslide-label { font-size: 15px; font-weight: 700; }
+.dslide-actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.btn-icon { padding-inline: 10px; }
+.dslide-text { min-height: 2lh; font-size: 15px; }
+.dslide-field { margin: 10px 0 0; max-width: 68ch; }
+.dslide-note { padding: 18px 0; border-top: 1px solid var(--line); color: var(--slate); font-size: 13.5px; }
+
+/* Hook preview in the tray: a small copy of the first slide. */
+.dprev {
+  margin: 0; width: 252px; flex: none;
+  aspect-ratio: 4 / 5; border-radius: 14px; border: 1px solid var(--line);
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 30px 22px 18px; overflow: hidden;
+  box-shadow: 0 18px 40px -24px rgba(12, 20, 30, .45);
+}
+.dprev-text {
+  margin: 0; text-align: center; font-weight: 700; font-size: 17px; line-height: 1.35;
+  font-family: "Mali", "Comic Sans MS", "Chalkboard SE", var(--font, system-ui), sans-serif;
+}
+.dprev-empty { opacity: .45; font-weight: 500; }
+.dprev-art { flex: 1; min-height: 0; max-width: 78%; object-fit: contain; mix-blend-mode: multiply; }
+.card-drawn {
+  width: 100%; height: 100%; padding: 16px 12px; background: #faf9f6; color: #111;
+  display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center;
+  font-size: 12.5px; font-weight: 650; line-height: 1.3;
+}
+.card-drawn span { order: -1; }
+.card-drawn img { flex: 1; min-height: 0; max-width: 80%; object-fit: contain; mix-blend-mode: multiply; }

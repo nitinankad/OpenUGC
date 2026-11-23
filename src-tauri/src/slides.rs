@@ -2,6 +2,7 @@
 //! text is shaped with rustybuzz and filled as vector paths with tiny-skia,
 //! and the iPhone mockup is drawn flat, then perspective-warped onto the hook slide.
 
+use crate::drawn::DrawnSlide;
 use crate::prepare::PreparedApp;
 use anyhow::{bail, Context, Result};
 use rustybuzz::ttf_parser::{GlyphId, OutlineBuilder};
@@ -21,6 +22,8 @@ static DISPLAY_BOLD: &[u8] = include_bytes!("../fonts/InterDisplay-Bold.ttf");
 static DISPLAY_REGULAR: &[u8] = include_bytes!("../fonts/InterDisplay-Regular.ttf");
 static DISPLAY_SEMIBOLD: &[u8] = include_bytes!("../fonts/InterDisplay-SemiBold.ttf");
 static TEXT_LIGHT: &[u8] = include_bytes!("../fonts/Inter-Light.ttf");
+/// Rounded handwriting for the relatable-drawings format (Mali, SIL Open Font License).
+static HAND: &[u8] = include_bytes!("../fonts/Mali-SemiBold.ttf");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -171,11 +174,13 @@ fn hook_slide(f: &Fonts, pal: &Palette, o: &SlideOptions, icons: &[Option<Pixmap
 
     // Phone first so the headline always sits on top of its shadow.
     let phone = phone_mockup(pal, icons);
-    // Shrunk around the middle of its top edge, so the top stays put and it still runs off the bottom.
-    const PHONE_SCALE: f32 = 0.88;
+    // Shrunk around the middle of its top edge, then pushed down so less of it shows and its top
+    // clears the headline; it still runs off the bottom.
+    const PHONE_SCALE: f32 = 0.74;
+    const PHONE_DROP: f32 = 300.0;
     let (ax, ay) = (1385.0, 845.0);
     let quad = [(720.0, 905.0), (2050.0, 785.0), (2110.0, 3730.0), (705.0, 3610.0)]
-        .map(|(x, y): (f32, f32)| (ax + (x - ax) * PHONE_SCALE, ay + (y - ay) * PHONE_SCALE));
+        .map(|(x, y): (f32, f32)| (ax + (x - ax) * PHONE_SCALE, ay + (y - ay) * PHONE_SCALE + PHONE_DROP));
     drop_shadow(&mut pm, &quad, (46.0 * PHONE_SCALE, 34.0 * PHONE_SCALE), 0.42);
     warp_onto(&mut pm, &phone, &quad);
 
@@ -275,6 +280,197 @@ fn cta_slide(f: &Fonts, pal: &Palette, o: &SlideOptions, icons: &[Option<Pixmap>
         draw_text_centered(&mut pm, &f.semibold, "all apps from this post", 58.0, -0.01, W as f32 / 2.0, iy + s + 120.0, pal.muted);
     }
     pm
+}
+
+// ---------------------------------------------------------------------------
+// Relatable drawings format: a line of handwriting above a stick-figure drawing
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DrawnStyle {
+    pub background: String,
+    pub text: String,
+    pub accent: String,
+}
+
+impl Default for DrawnStyle {
+    fn default() -> Self {
+        Self { background: "#faf9f6".into(), text: "#111111".into(), accent: "#e0201b".into() }
+    }
+}
+
+/// The last slide's app: shown as its icon and name under the drawing.
+pub struct PlugApp<'a> {
+    pub name: &'a str,
+    pub icon: Option<&'a Path>,
+}
+
+struct DrawnPalette {
+    bg: [u8; 3],
+    ink: [u8; 3],
+    accent: [u8; 3],
+}
+
+/// Renders the hook and points (`slides[0]` is the hook), then the plug, into `out_dir` as JPEGs.
+pub fn render_drawn(
+    slides: &[DrawnSlide],
+    accent: &str,
+    plug: Option<(&DrawnSlide, PlugApp)>,
+    style: &DrawnStyle,
+    out_dir: &Path,
+) -> Result<RenderedSlideshow> {
+    if slides.iter().all(|s| s.text.trim().is_empty()) {
+        bail!("Write the slides first.");
+    }
+    let pal = DrawnPalette {
+        bg: parse_hex(&style.background).context("background colour")?,
+        ink: parse_hex(&style.text).context("text colour")?,
+        accent: parse_hex(&style.accent).context("highlight colour")?,
+    };
+    let face = Face::from_slice(HAND, 0).context("bundled font failed to load")?;
+    let drawing = |s: &DrawnSlide, i: usize| -> Result<Option<image::GrayImage>> {
+        match &s.image {
+            Some(p) => Ok(Some(image::open(p).with_context(|| format!("Couldn't open the drawing for slide {}", i + 1))?.to_luma8())),
+            None => Ok(None),
+        }
+    };
+    std::fs::create_dir_all(out_dir)?;
+    let mut out = Vec::new();
+    let mut save = |name: String, pm: &Pixmap| -> Result<()> {
+        let path = out_dir.join(name);
+        save_jpeg(pm, &path)?;
+        out.push(path);
+        Ok(())
+    };
+    let shown: Vec<&DrawnSlide> = slides.iter().filter(|s| !s.text.trim().is_empty()).collect();
+    for (i, s) in shown.iter().enumerate() {
+        let (size, acc) = if i == 0 { (150.0, accent) } else { (132.0, "") };
+        let pm = drawn_slide(&face, &pal, s.text.trim(), acc, size, drawing(s, i)?.as_ref(), None);
+        let name = if i == 0 { "01-hook.jpg".to_string() } else { format!("{:02}-{}.jpg", i + 1, slug(&s.text)) };
+        save(name, &pm)?;
+    }
+    if let Some((s, app)) = plug {
+        if !s.text.trim().is_empty() {
+            let icon = app.icon.and_then(|p| load_pixmap(p).ok());
+            let pm = drawn_slide(&face, &pal, s.text.trim(), "", 120.0, drawing(s, shown.len())?.as_ref(), Some((icon.as_ref(), app.name)));
+            save(format!("{:02}-{}.jpg", shown.len() + 1, slug(app.name)), &pm)?;
+        }
+    }
+    Ok(RenderedSlideshow { dir: out_dir.to_path_buf(), slides: out })
+}
+
+fn drawn_slide(
+    face: &Face,
+    pal: &DrawnPalette,
+    text: &str,
+    accent: &str,
+    base_size: f32,
+    drawing: Option<&image::GrayImage>,
+    badge: Option<(Option<&Pixmap>, &str)>,
+) -> Pixmap {
+    let mut pm = Pixmap::new(W, H).unwrap();
+    pm.fill(rgb(pal.bg[0], pal.bg[1], pal.bg[2]));
+    let cx = W as f32 / 2.0;
+
+    // Balanced, centred lines; long lines shrink rather than run past five lines.
+    let max_w = 1720.0;
+    let mut size = base_size;
+    let mut lines = balanced_wrap(face, text, size, max_w);
+    while lines.len() > 5 && size > 92.0 {
+        size -= 4.0;
+        lines = balanced_wrap(face, text, size, max_w);
+    }
+    let line_h = size * 1.42;
+    let cap = size * 0.72;
+    let block = (lines.len() as f32 - 1.0) * line_h + size;
+    // The text block sits around 30% of the way down, like the reference slides; alone it's centred.
+    let centre = if drawing.is_some() || badge.is_some() { H as f32 * 0.30 } else { H as f32 * 0.5 };
+    let first = (centre - block / 2.0 + cap).max(300.0);
+
+    // Words of the accent phrase, matched as a run of words in the text.
+    let norm = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    let words: Vec<String> = text.split_whitespace().map(norm).collect();
+    let want: Vec<String> = accent.split_whitespace().map(norm).filter(|w| !w.is_empty()).collect();
+    let mut hot = vec![false; words.len()];
+    if !want.is_empty() {
+        if let Some(i) = (0..words.len().saturating_sub(want.len() - 1)).find(|&i| words[i..i + want.len()] == want[..]) {
+            hot[i..i + want.len()].iter_mut().for_each(|h| *h = true);
+        }
+    }
+    let space = text_width(face, " ", size, 0.0);
+    let mut k = 0;
+    for (li, line) in lines.iter().enumerate() {
+        let baseline = first + li as f32 * line_h;
+        let mut x = cx - text_width(face, line, size, 0.0) / 2.0;
+        for word in line.split_whitespace() {
+            let color = if hot.get(k).copied().unwrap_or(false) { pal.accent } else { pal.ink };
+            draw_text(&mut pm, face, word, size, 0.0, x, baseline, color);
+            x += text_width(face, word, size, 0.0) + space;
+            k += 1;
+        }
+    }
+    let text_bottom = first + (lines.len() as f32 - 1.0) * line_h + size * 0.3;
+
+    let bottom = if badge.is_some() { H as f32 - 600.0 } else { H as f32 - 200.0 };
+    if let Some(img) = drawing {
+        let top = text_bottom + 130.0;
+        let box_h = (bottom - top).max(320.0);
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        let s = (1200.0 / iw).min(box_h.min(1020.0) / ih);
+        let (dw, dh) = ((iw * s).round().max(1.0) as u32, (ih * s).round().max(1.0) as u32);
+        let x = ((W - dw.min(W)) / 2) as usize;
+        let y = (top + (box_h - dh as f32) * 0.3).max(0.0) as usize;
+        multiply_ink(&mut pm, &image::imageops::resize(img, dw, dh, image::imageops::FilterType::Lanczos3), x, y);
+    }
+
+    match badge {
+        // Icon and name in a row under the drawing.
+        Some((icon, name)) if drawing.is_some() => {
+            let (is, gap, ns) = (230.0, 50.0, 100.0);
+            let name = display_name(name);
+            let nw = text_width(face, &name, ns, 0.0).min(W as f32 - 2.0 * 200.0 - is - gap);
+            let row = if icon.is_some() { is + gap + nw } else { nw };
+            let x = (W as f32 - row) / 2.0;
+            let y = H as f32 - 470.0;
+            if let Some(icon) = icon {
+                soft_shadows(&mut pm, &[(x, y, is, is)], is * 0.225, 18.0, 0.22);
+                draw_image_cover(&mut pm, icon, x, y, is, is, is * 0.225);
+            }
+            let nx = if icon.is_some() { x + is + gap } else { x };
+            draw_text(&mut pm, face, &name, ns, 0.0, nx, y + is / 2.0 + ns * 0.35, pal.ink);
+        }
+        // No drawing: a large icon with the name under it.
+        Some((icon, name)) => {
+            let is = 440.0;
+            let y = (text_bottom + 220.0).min(H as f32 - is - 400.0);
+            if let Some(icon) = icon {
+                let x = (W as f32 - is) / 2.0;
+                soft_shadows(&mut pm, &[(x, y, is, is)], is * 0.225, 24.0, 0.22);
+                draw_image_cover(&mut pm, icon, x, y, is, is, is * 0.225);
+            }
+            draw_text_centered(&mut pm, face, &display_name(name), 110.0, 0.0, cx, y + is + 170.0, pal.ink);
+        }
+        None => {}
+    }
+    pm
+}
+
+/// Multiplies grey ink onto the slide, so white paper disappears into any background colour.
+fn multiply_ink(pm: &mut Pixmap, ink: &image::GrayImage, x0: usize, y0: usize) {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    let data = pm.data_mut();
+    for (x, y, p) in ink.enumerate_pixels() {
+        let (x, y) = (x0 + x as usize, y0 + y as usize);
+        if x >= w || y >= h || p.0[0] == 255 {
+            continue;
+        }
+        let i = (y * w + x) * 4;
+        let l = p.0[0] as u16;
+        for c in &mut data[i..i + 3] {
+            *c = ((*c as u16 * l + 127) / 255) as u8;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +979,29 @@ mod tests {
         assert_eq!((out.width(), out.height()), (1080, 1350));
         assert!(u64::from(out.width()) * u64::from(out.height()) <= TIKTOK_MAX_PIXELS);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Renders a relatable-drawings slideshow from a drawing at $OPENUGC_DRAWING:
+    /// `cargo test render_drawn_sample -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn render_drawn_sample() {
+        let src = std::env::var("OPENUGC_DRAWING").expect("OPENUGC_DRAWING");
+        let out = std::env::temp_dir().join("openugc-drawn-test");
+        let img = crate::drawn::clean_drawing(&image::open(&src).unwrap()).unwrap();
+        let clean = out.join("drawing.png");
+        std::fs::create_dir_all(&out).unwrap();
+        img.save(&clean).unwrap();
+        let s = |text: &str| DrawnSlide { text: text.into(), scene: String::new(), image: Some(clean.clone()) };
+        let slides = vec![
+            s("Hidden signs of loneliness"),
+            s("Struggling to believe that people genuinely enjoy your presence"),
+            s("You're very good at hiding your emotions, so no one knows you're not okay because you don't seem like someone who's mentally struggling"),
+            DrawnSlide { text: "You feel like no one really knows you".into(), ..Default::default() },
+        ];
+        let plug = s("Penpal helped me feel less alone: you write letters to people who actually write back.");
+        let r = render_drawn(&slides, "loneliness", Some((&plug, PlugApp { name: "Penpal: Slow Letters", icon: None })), &DrawnStyle::default(), &out).unwrap();
+        println!("rendered {} slides to {}", r.slides.len(), r.dir.display());
     }
 
     /// Renders a slideshow from the sample apps prepared in the app's data folder:

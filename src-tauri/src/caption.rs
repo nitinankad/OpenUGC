@@ -18,6 +18,11 @@ pub struct Caption {
 const CAPTION_INSTRUCTIONS: &str = "\
 You write the caption for a TikTok photo slideshow that shows hidden-gem iPhone apps, one app per slide.
 
+What it's about:
+- Base the caption and hashtags on the hook (the first slide's headline) and on what the apps in this slideshow have in common. That is the theme.
+- One app may be marked as the creator's own. It's just one of the picks: never theme the caption or hashtags around it.
+- A search term may be given as a hint. Ignore it if the apps don't match it.
+
 Rules for the caption:
 - One or two short lines, under 150 characters in total.
 - Casual and natural, like a real person posting. Lowercase is fine. At most one emoji.
@@ -25,33 +30,86 @@ Rules for the caption:
 - No hashtags in the caption itself, no quotes, no links, no prices.
 
 Rules for the hashtags:
-- Exactly 5, relevant to the apps and the niche.
-- Mix one or two broad ones people search (like appstore or iphoneapps) with specific ones for the niche.
+- Exactly 5, relevant to the theme of these apps.
+- Mix one or two broad ones people search (like appstore or iphoneapps) with specific ones for the theme.
 - Lowercase letters and digits only, no spaces, no '#'.
 
 Reply with only this JSON and nothing else:
 {\"caption\": \"...\", \"hashtags\": [\"...\", \"...\", \"...\", \"...\", \"...\"]}";
 
-fn brief(niche: &str, apps: &[PreparedApp]) -> String {
+pub struct CaptionBrief<'a> {
+    /// The hook slide's headline.
+    pub hook: &'a str,
+    /// The last search term, if any. Only a hint: it may be left over from another post.
+    pub niche: &'a str,
+    pub apps: &'a [PreparedApp],
+    /// The creator's own app among `apps`, if it's in this slideshow.
+    pub own_app_id: Option<u64>,
+}
+
+fn brief(b: &CaptionBrief) -> String {
     let mut s = String::new();
-    if !niche.trim().is_empty() {
-        s.push_str(&format!("Niche: {}\n\n", niche.trim()));
+    if !b.hook.trim().is_empty() {
+        s.push_str(&format!("Hook: {}\n", b.hook.trim()));
     }
     s.push_str("Apps in the slideshow, in order:\n");
-    for (i, p) in apps.iter().enumerate() {
-        s.push_str(&format!("{}. {} ({}): {}\n", i + 1, p.app.track_name, p.app.primary_genre_name, p.overview));
+    for (i, p) in b.apps.iter().enumerate() {
+        let mine = if Some(p.app.track_id) == b.own_app_id { " [the creator's own app]" } else { "" };
+        s.push_str(&format!("{}. {} ({}){mine}: {}\n", i + 1, p.app.track_name, p.app.primary_genre_name, p.overview));
+    }
+    if !b.niche.trim().is_empty() {
+        s.push_str(&format!("Search term (hint only): {}\n", b.niche.trim()));
     }
     s
 }
 
-pub fn generate_caption(niche: &str, apps: &[PreparedApp], writer: Writer) -> Result<Caption> {
-    if apps.is_empty() {
+pub fn generate_caption(b: &CaptionBrief, writer: Writer) -> Result<Caption> {
+    if b.apps.is_empty() {
         bail!("Prepare some apps first");
     }
-    let prompt = brief(niche, apps);
+    let prompt = brief(b);
     let raw = match writer {
         Writer::Claude => prepare::run_claude(CAPTION_INSTRUCTIONS, &prompt)?,
         Writer::Codex => prepare::run_codex(CAPTION_INSTRUCTIONS, &prompt)?,
+    };
+    parse(&raw)
+}
+
+const DRAWN_CAPTION_INSTRUCTIONS: &str = "\
+You write the caption for a relatable TikTok photo slideshow: short lines about everyday struggles, each over a simple stick-figure drawing.
+
+Rules for the caption:
+- One or two short lines, under 150 characters in total.
+- Casual and warm, like a real person posting. Lowercase is fine. At most one emoji.
+- Invite people to save it, send it to a friend, or say in the comments which slide is them. Don't repeat the slides.
+- Don't name or advertise any app. No hashtags in the caption itself, no quotes, no links.
+- Never mention self-harm, suicide, eating disorders, medication or diagnosis.
+
+Rules for the hashtags:
+- Exactly 5, relevant to the topic.
+- Mix one or two broad ones people search (like mentalhealth or relatable) with specific ones for the topic.
+- Lowercase letters and digits only, no spaces, no '#'.
+
+Reply with only this JSON and nothing else:
+{\"caption\": \"...\", \"hashtags\": [\"...\", \"...\", \"...\", \"...\", \"...\"]}";
+
+/// Caption for the relatable-drawings format, from its topic and slide text.
+pub fn generate_drawn_caption(topic: &str, slides: &[String], writer: Writer) -> Result<Caption> {
+    let lines: Vec<&str> = slides.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if lines.is_empty() {
+        bail!("Write the slides first");
+    }
+    let mut prompt = String::new();
+    if !topic.trim().is_empty() {
+        prompt.push_str(&format!("Topic: {}\n\n", topic.trim()));
+    }
+    prompt.push_str("Slides, in order (the first is the title):\n");
+    for (i, l) in lines.iter().enumerate() {
+        prompt.push_str(&format!("{}. {l}\n", i + 1));
+    }
+    let raw = match writer {
+        Writer::Claude => prepare::run_claude(DRAWN_CAPTION_INSTRUCTIONS, &prompt)?,
+        Writer::Codex => prepare::run_codex(DRAWN_CAPTION_INSTRUCTIONS, &prompt)?,
     };
     parse(&raw)
 }
@@ -95,6 +153,22 @@ pub fn post_text(c: &Caption) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepared(id: u64, name: &str) -> PreparedApp {
+        let app = serde_json::from_value(serde_json::json!({ "trackId": id, "trackName": name, "primaryGenreName": "Games" })).unwrap();
+        PreparedApp { app, dir: Default::default(), icon: None, screenshots: vec![], overview: format!("{name} overview") }
+    }
+
+    #[test]
+    fn brief_leads_with_hook_and_marks_own_app() {
+        let apps = [prepared(1, "Cozy Farm"), prepared(2, "Penpal"), prepared(3, "Tiny Town")];
+        let s = brief(&CaptionBrief { hook: "cosy games for rainy days", niche: "pen pals", apps: &apps, own_app_id: Some(2) });
+        assert!(s.starts_with("Hook: cosy games for rainy days\n"));
+        assert!(s.contains("2. Penpal (Games) [the creator's own app]"));
+        assert!(!s.contains("Cozy Farm (Games) [the creator's"));
+        assert!(s.contains("Search term (hint only): pen pals"));
+        assert!(!s.contains("Niche:"));
+    }
 
     #[test]
     fn parses_fenced_reply_and_cleans_tags() {

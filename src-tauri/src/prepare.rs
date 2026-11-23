@@ -41,7 +41,7 @@ pub fn prepare(app: &AppInfo, data_root: &Path, writer: Writer) -> Result<Prepar
     Ok(prepared)
 }
 
-fn download(client: &reqwest::blocking::Client, url: &str, path: &Path) -> Result<PathBuf> {
+pub(crate) fn download(client: &reqwest::blocking::Client, url: &str, path: &Path) -> Result<PathBuf> {
     if !path.exists() {
         let bytes = client.get(url).send()?.error_for_status()?.bytes()?;
         std::fs::write(path, &bytes)?;
@@ -159,7 +159,7 @@ pub(crate) fn run_codex(instructions: &str, prompt: &str) -> Result<String> {
 }
 
 /// Runs a CLI with `prompt` on stdin and returns stdout.
-fn run_cli(name: &str, args: &[&str], prompt: &str, cwd: Option<&Path>) -> Result<Vec<u8>> {
+pub(crate) fn run_cli(name: &str, args: &[&str], prompt: &str, cwd: Option<&Path>) -> Result<Vec<u8>> {
     let mut child = spawn_cli(name, args, cwd)?;
     child.stdin.take().unwrap().write_all(prompt.as_bytes())?;
     let out = child.wait_with_output()?;

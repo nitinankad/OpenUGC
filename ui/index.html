@@ -6,7 +6,7 @@
   <title>OpenUGC</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Mali:wght@600&display=swap" rel="stylesheet" />
   <script src="theme.js"></script>
   <link rel="stylesheet" href="styles.css" />
   <script type="module" src="app.js"></script>
@@ -20,8 +20,9 @@
         <span class="rail-account" id="rail-account"></span>
         <input class="rail-name" id="post-name" type="text" spellcheck="false" aria-label="Post name" />
       </div>
-      <button class="nav-item nav-step" data-view="find">Find apps</button>
-      <button class="nav-item nav-step" data-view="prepare">Prepared <span class="nav-count" id="nav-prepared"></span></button>
+      <button class="nav-item nav-step" data-view="find" data-format="gems">Find apps</button>
+      <button class="nav-item nav-step" data-view="prepare" data-format="gems">Prepared <span class="nav-count" id="nav-prepared"></span></button>
+      <button class="nav-item nav-step" data-view="write" data-format="drawn" hidden>Write</button>
       <button class="nav-item nav-step" data-view="slides">Slides</button>
       <button class="nav-item nav-bottom" data-view="analytics">Analytics</button>
       <button class="nav-item" data-view="settings">Settings</button>
@@ -38,10 +39,9 @@
         <header class="find-head board-head">
           <div>
             <h1>Posts</h1>
-            <p class="lede">Each TikTok account has its own posts. Open a post to pick its apps, make its slides and schedule it.</p>
+            <p class="lede">Each TikTok account has its own posts. Open a post to make its slides and send them to your phone.</p>
           </div>
           <div class="inline">
-            <button type="button" class="btn btn-quiet" id="refresh-posts" hidden>Refresh status</button>
             <button type="button" class="btn btn-primary btn-sm" id="add-account">Add account</button>
           </div>
         </header>
@@ -60,6 +60,15 @@
             <div class="hook-start-head">
               <h2 id="hook-start-title">Start with a hook</h2>
               <p class="hook-now" id="find-hook-text"></p>
+            </div>
+            <div class="hook-style">
+              <div class="segmented" role="radiogroup" aria-label="Kind of hooks">
+                <button type="button" role="radio" data-hook-mode="generic">Generic</button>
+                <button type="button" role="radio" data-hook-mode="niche">Niche</button>
+                <button type="button" role="radio" data-hook-mode="fit">Fit this post</button>
+              </div>
+              <input type="text" class="hook-niche" data-hook-niche spellcheck="false" placeholder="pen pals, cosy games, budgeting" aria-label="Niche for the hooks" hidden />
+              <p class="field-note hook-mode-note" data-hook-mode-note></p>
             </div>
             <div class="inline">
               <button type="button" class="btn btn-ask btn-sm" data-hook-suggest>Suggest hooks</button>
@@ -118,6 +127,31 @@
           <p>Add up to six apps in Find apps, then press Prepare in the preview.</p>
         </div>
       </section>
+      <!-- Write (relatable drawings) -->
+      <section class="view" id="view-write" hidden>
+        <header class="find-head">
+          <h1>Write the slideshow</h1>
+          <p class="lede">Give a topic and the writer drafts a hook, the slides and a last slide about your app. Each slide gets a stick-figure drawing. Edit any line or drawing, then draw them.</p>
+          <form class="search write-form" id="write-form" autocomplete="off">
+            <input id="drawn-topic" type="text" spellcheck="true" placeholder="adult friendships, loneliness, burnout" aria-label="Topic" />
+            <label class="write-points">Slides <select id="drawn-points"></select></label>
+            <button type="submit" class="btn btn-ask" id="write-btn">Write</button>
+          </form>
+          <p class="search-hint" id="write-hint"></p>
+          <p class="repeat-note" id="drawn-repeat" hidden></p>
+        </header>
+        <div class="drawn-bar" id="drawn-bar" hidden>
+          <button type="button" class="btn btn-primary btn-sm" id="draw-all">Draw all</button>
+          <button type="button" class="btn btn-quiet" id="add-slide">Add slide</button>
+          <span class="drawn-count" id="drawn-count"></span>
+        </div>
+        <ol class="drawn-list" id="drawn-list"></ol>
+        <div class="empty" id="write-empty">
+          <p class="empty-title">Start with a topic.</p>
+          <p>Try something everyday, like adult friendships, overthinking or burnout. You can rewrite or edit every slide afterwards.</p>
+        </div>
+      </section>
+
       <!-- Slides -->
       <section class="view" id="view-slides" hidden>
         <header class="find-head">
@@ -128,6 +162,15 @@
           <form class="settings" id="slide-settings" autocomplete="off">
             <fieldset>
               <legend>Hook slide</legend>
+              <div class="hook-style">
+                <div class="segmented" role="radiogroup" aria-label="Kind of hooks">
+                  <button type="button" role="radio" data-hook-mode="generic">Generic</button>
+                  <button type="button" role="radio" data-hook-mode="niche">Niche</button>
+                  <button type="button" role="radio" data-hook-mode="fit">Fit this post</button>
+                </div>
+                <input type="text" class="hook-niche" data-hook-niche spellcheck="false" placeholder="pen pals, cosy games, budgeting" aria-label="Niche for the hooks" hidden />
+                <p class="field-note hook-mode-note" data-hook-mode-note></p>
+              </div>
               <div class="inline hook-suggest">
                 <button type="button" class="btn btn-ask btn-sm" data-hook-suggest>Suggest hooks</button>
                 <button type="button" class="btn btn-quiet" data-hook-save>Save this hook</button>
@@ -160,6 +203,16 @@
               <button type="button" class="btn btn-quiet" id="reset-colors">Reset colours</button>
             </fieldset>
           </form>
+          <form class="settings" id="drawn-settings" autocomplete="off" hidden>
+            <fieldset>
+              <legend>Colours</legend>
+              <div class="color-row"><input type="color" data-dcolor="accent" aria-label="Highlight colour" /><input type="text" data-dhex="accent" maxlength="7" /><span>Highlighted words</span></div>
+              <div class="color-row"><input type="color" data-dcolor="text" aria-label="Text colour" /><input type="text" data-dhex="text" maxlength="7" /><span>Text</span></div>
+              <div class="color-row"><input type="color" data-dcolor="background" aria-label="Background colour" /><input type="text" data-dhex="background" maxlength="7" /><span>Background</span></div>
+              <button type="button" class="btn btn-quiet" id="reset-dcolors">Reset colours</button>
+            </fieldset>
+            <p class="hint">Change the words and drawings in <button type="button" class="link" data-goto="write">Write</button>.</p>
+          </form>
           <div class="slides-output">
             <div class="slides-actions">
               <button class="btn btn-primary" id="make-slides">Make slides</button>
@@ -182,25 +235,21 @@
               <label class="field">Hashtags, separated by spaces <input type="text" id="post-tags" spellcheck="false" placeholder="appstore iphoneapps" /></label>
               <div class="charcount" id="tag-count"></div>
 
-              <div class="post-head post-head-gap"><h2>Schedule on Buffer</h2></div>
-              <p class="hint">Buffer sends a reminder to your phone at this time. You post it from TikTok yourself, so you can add a sound first. Nothing is posted automatically.</p>
-              <div class="scheduled-box" id="post-scheduled" hidden>
-                <p id="post-scheduled-text"></p>
-                <button type="button" class="btn btn-quiet" id="refresh-post">Refresh status</button>
-              </div>
-              <div id="schedule-form">
-                <div class="field">
-                  <label for="post-channel">Buffer account</label>
+              <div class="post-head post-head-gap"><h2>Send to phone</h2></div>
+              <p class="hint">Uploads the slides, caption and hashtags to your R2 bucket. Scan the code with your phone to save every slide in one go and copy the caption, then post it from TikTok.</p>
+              <div class="phone-send" id="phone-send">
+                <div class="phone-qr" id="phone-qr" hidden></div>
+                <div class="phone-side">
+                  <p class="phone-state" id="phone-state"></p>
                   <div class="inline">
-                    <select id="post-channel"></select>
-                    <button type="button" class="btn btn-quiet" id="load-channels">Reload</button>
+                    <button type="button" class="btn btn-primary" id="phone-btn">Send to phone</button>
+                    <button type="button" class="btn btn-quiet" id="phone-copy" hidden>Copy link</button>
+                    <button type="button" class="btn btn-quiet" id="phone-open" hidden>Open link</button>
                   </div>
-                  <span class="field-note" id="channel-hint"></span>
+                  <div class="phone-posted" id="phone-posted" hidden></div>
                 </div>
-                <label class="field">Reminder time <input type="datetime-local" id="post-when" /></label>
-                <button type="button" class="btn btn-primary" id="schedule-btn">Schedule reminder</button>
               </div>
-              <p class="hint" id="schedule-needs" hidden>Add your Buffer API key and R2 details in <button type="button" class="link" data-goto="settings">Settings</button> first.</p>
+              <p class="hint" id="phone-needs" hidden>Add your R2 details in <button type="button" class="link" data-goto="settings">Settings</button> first.</p>
             </section>
           </div>
         </div>
@@ -248,13 +297,9 @@
         <div class="settings-page">
           <form class="settings" id="settings-form" autocomplete="off">
             <fieldset>
-              <legend>Buffer</legend>
-              <label class="field">API key <input type="password" id="set-buffer-key" spellcheck="false" /></label>
-              <p class="hint">In Buffer, open Settings, then API, and create a key. Connect your TikTok accounts in Buffer too.</p>
-            </fieldset>
-            <fieldset>
               <legend>Slide hosting on Cloudflare R2</legend>
-              <p class="hint">Buffer only takes images from public links, so slides are uploaded to your R2 bucket first. In the bucket's settings, turn on public access (the r2.dev link or a custom domain). Then create an R2 API token with Object Read &amp; Write on that bucket.</p>
+              <p class="hint">Send to phone uploads each post's slides and a small page to your R2 bucket, so your phone can open them from a link. In the bucket's settings, turn on public access (the r2.dev link or a custom domain). Then create an R2 API token with Object Read &amp; Write on that bucket.</p>
+              <p class="hint">To clear out old posts automatically, add a lifecycle rule in the bucket's settings that deletes objects with the prefix <code>phone/</code> after a few weeks.</p>
               <label class="field">Account ID <input type="text" data-s="r2AccountId" spellcheck="false" /></label>
               <label class="field">Access key ID <input type="text" data-s="r2AccessKeyId" spellcheck="false" /></label>
               <label class="field">Secret access key <input type="password" id="set-r2-secret" spellcheck="false" /></label>
@@ -269,7 +314,6 @@
             </fieldset>
             <div class="inline">
               <button type="submit" class="btn btn-primary" id="save-settings">Save settings</button>
-              <button type="button" class="btn btn-quiet" id="check-buffer">Check Buffer</button>
               <button type="button" class="btn btn-quiet" id="check-r2">Check R2</button>
               <button type="button" class="btn btn-quiet" id="check-metrics">Check analytics</button>
             </div>
@@ -277,7 +321,7 @@
 
           <section class="transfer">
             <h2>Use on another computer</h2>
-            <p class="hint">Copy a settings code here and paste it into OpenUGC on your other computer. It brings over your keys, R2 and analytics details, and accounts (usernames, Buffer links and the app each promotes). Posts stay on this computer. Because it contains your keys, only send it to yourself somewhere private.</p>
+            <p class="hint">Copy a settings code here and paste it into OpenUGC on your other computer. It brings over your keys, R2 and analytics details, and accounts (usernames, formats and the app each promotes). Posts stay on this computer. Because it contains your keys, only send it to yourself somewhere private.</p>
             <button type="button" class="btn btn-quiet" id="copy-settings">Copy settings code</button>
             <label class="field transfer-paste">Paste a settings code from your other computer
               <textarea class="overview" id="import-code" rows="3" spellcheck="false"></textarea>
@@ -289,6 +333,10 @@
     </main>
 
     <aside class="tray" aria-label="Hook slide preview">
+      <figure class="dprev" id="dprev" hidden>
+        <p class="dprev-text" id="dprev-text"></p>
+        <img class="dprev-art" id="dprev-art" alt="" hidden />
+      </figure>
       <div class="phone">
         <div class="island"></div>
         <div class="screen">
@@ -328,11 +376,18 @@
           </div>
         </form>
       </section>
-      <div class="writer" role="radiogroup" aria-label="Write overviews with">
-        <span class="writer-label">Overviews by</span>
+      <div class="writer" role="radiogroup" aria-label="Write with">
+        <span class="writer-label" id="writer-label">Overviews by</span>
         <div class="segmented">
           <button role="radio" data-writer="claude">Claude</button>
           <button role="radio" data-writer="codex">Codex</button>
+        </div>
+      </div>
+      <div class="writer" id="artist-row" role="radiogroup" aria-label="Draw with" hidden>
+        <span class="writer-label">Drawings by</span>
+        <div class="segmented">
+          <button role="radio" data-artist="codex" title="Codex's image generation. Closest to hand-drawn.">Codex</button>
+          <button role="radio" data-artist="claude" title="Claude draws SVG line art. Simpler and faster.">Claude</button>
         </div>
       </div>
       <button class="btn btn-primary btn-wide" id="prepare-btn" disabled>Prepare apps</button>
@@ -340,5 +395,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <div class="ctx-menu" id="slot-menu" role="menu" hidden></div>
 </body>
 </html>

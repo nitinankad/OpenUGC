@@ -45,7 +45,21 @@ Rules:
 Reply with only this JSON and nothing else:
 {\"hooks\": [{\"accent\": \"hidden gems\", \"line2\": \"for people who\", \"line3\": \"miss real mail\"}]}";
 
+/// What the hooks should be about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookStyle {
+    /// Broad hooks for any iPhone user, with no niche or audience.
+    Generic,
+    /// Every hook speaks to the niche given.
+    Niche,
+    /// Fit the creator's app, the apps picked and the search niche.
+    #[default]
+    Fit,
+}
+
 pub struct HookBrief<'a> {
+    pub style: HookStyle,
     pub niche: &'a str,
     pub own_app: Option<&'a AppInfo>,
     pub apps: &'a [PreparedApp],
@@ -56,15 +70,37 @@ pub struct HookBrief<'a> {
 
 fn brief(b: &HookBrief) -> String {
     let mut s = format!("Number of apps in the slideshow: {}\n", b.count);
-    if !b.niche.trim().is_empty() {
-        s.push_str(&format!("Niche: {}\n", b.niche.trim()));
-    }
-    if let Some(a) = b.own_app {
-        let about: String = a.description.chars().take(600).collect();
-        s.push_str(&format!(
-            "The creator's own app (sets the niche; never name it): {} ({}). {}\n",
-            a.track_name, a.primary_genre_name, about
-        ));
+    let niche = b.niche.trim();
+    match b.style {
+        HookStyle::Generic => {
+            // Leave out the niche and the apps so they don't pull the hooks back into one.
+            s.push_str(
+                "Style: generic. Broad headlines any iPhone user would stop for, not tied to a niche, audience or hobby \
+                 (like: underrated iphone apps, apps nobody talks about, your phone needs these, apps i can't live without). \
+                 Ignore the niche examples above; use the openings, not the topics.\n",
+            );
+            push_used(&mut s, b);
+            s.push_str(&format!("Write {} headlines.\n", b.how_many));
+            return s;
+        }
+        HookStyle::Niche => {
+            s.push_str(&format!(
+                "Style: niche. Every headline speaks to people into this niche, in their own words: {niche}\n\
+                 Use the apps below only as background; the niche comes first.\n"
+            ));
+        }
+        HookStyle::Fit => {
+            if !niche.is_empty() {
+                s.push_str(&format!("Niche: {niche}\n"));
+            }
+            if let Some(a) = b.own_app {
+                let about: String = a.description.chars().take(600).collect();
+                s.push_str(&format!(
+                    "The creator's own app (sets the niche; never name it): {} ({}). {}\n",
+                    a.track_name, a.primary_genre_name, about
+                ));
+            }
+        }
     }
     if !b.apps.is_empty() {
         s.push_str("Apps in this slideshow:\n");
@@ -72,11 +108,15 @@ fn brief(b: &HookBrief) -> String {
             s.push_str(&format!("- {}: {}\n", p.app.track_name, p.overview));
         }
     }
+    push_used(&mut s, b);
+    s.push_str(&format!("Write {} headlines.\n", b.how_many));
+    s
+}
+
+fn push_used(s: &mut String, b: &HookBrief) {
     if !b.used.is_empty() {
         s.push_str(&format!("Already used: {}\n", b.used.join("; ")));
     }
-    s.push_str(&format!("Write {} headlines.\n", b.how_many));
-    s
 }
 
 pub fn suggest_hooks(b: &HookBrief, writer: Writer) -> Result<Vec<Hook>> {
@@ -109,6 +149,20 @@ fn parse(raw: &str) -> Result<Vec<Hook>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn brief_follows_style() {
+        let used = ["old hook".to_string()];
+        let b = |style, niche| HookBrief { style, niche, own_app: None, apps: &[], count: 6, used: &used, how_many: 8 };
+        let generic = brief(&b(HookStyle::Generic, "letters"));
+        assert!(generic.contains("Style: generic") && !generic.contains("letters") && generic.contains("Already used: old hook"));
+        let niche = brief(&b(HookStyle::Niche, "cosy games"));
+        assert!(niche.contains("Style: niche") && niche.contains("cosy games") && niche.contains("Write 8 headlines"));
+        let fit = brief(&b(HookStyle::Fit, "letters"));
+        assert!(fit.contains("Niche: letters") && !fit.contains("Style:"));
+    }
+
     #[test]
     fn parses_hooks() {
         let raw = "```json\n{\"hooks\": [{\"accent\": \" 6 apps \", \"line2\": \"for pen pals\", \"line3\": \"\"}, {\"accent\": \"\"}]}\n```";

@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 const KEYCHAIN_SERVICE: &str = "com.openugc.OpenUGC";
-const BUFFER_KEY: &str = "buffer-api-key";
 const R2_SECRET: &str = "r2-secret-access-key";
 const METRICS_TOKEN: &str = "metrics-api-token";
 
@@ -28,7 +27,6 @@ pub struct Settings {
 pub struct SettingsView {
     #[serde(flatten)]
     pub settings: Settings,
-    pub has_buffer_key: bool,
     pub has_r2_secret: bool,
     pub has_metrics_token: bool,
 }
@@ -43,7 +41,6 @@ pub fn load(dir: &Path) -> Settings {
 pub fn view(dir: &Path) -> SettingsView {
     SettingsView {
         settings: load(dir),
-        has_buffer_key: secret(BUFFER_KEY).is_some(),
         has_r2_secret: secret(R2_SECRET).is_some(),
         has_metrics_token: secret(METRICS_TOKEN).is_some(),
     }
@@ -53,7 +50,6 @@ pub fn view(dir: &Path) -> SettingsView {
 pub fn save(
     dir: &Path,
     s: &Settings,
-    buffer_key: Option<String>,
     r2_secret: Option<String>,
     metrics_token: Option<String>,
 ) -> Result<()> {
@@ -67,12 +63,11 @@ pub fn save(
     let tmp = dir.join("settings.json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&clean)?)?;
     std::fs::rename(&tmp, dir.join("settings.json"))?;
-    if let Some(v) = buffer_key {
-        set_secret(BUFFER_KEY, v.trim())?;
-    }
     if let Some(v) = r2_secret {
         set_secret(R2_SECRET, v.trim())?;
     }
+    // Buffer is gone; clear the key it used to keep.
+    let _ = set_secret("buffer-api-key", "");
     if let Some(v) = metrics_token {
         set_secret(METRICS_TOKEN, v.trim())?;
     }
@@ -84,7 +79,6 @@ pub fn save(
 #[serde(rename_all = "camelCase")]
 pub struct Export {
     pub settings: Settings,
-    pub buffer_key: String,
     pub r2_secret: String,
     pub metrics_token: String,
 }
@@ -92,14 +86,9 @@ pub struct Export {
 pub fn export(dir: &Path) -> Export {
     Export {
         settings: load(dir),
-        buffer_key: secret(BUFFER_KEY).unwrap_or_default(),
         r2_secret: secret(R2_SECRET).unwrap_or_default(),
         metrics_token: secret(METRICS_TOKEN).unwrap_or_default(),
     }
-}
-
-pub fn buffer_key() -> Result<String> {
-    secret(BUFFER_KEY).context("Add your Buffer API key in Settings first")
 }
 
 pub fn r2_secret() -> Result<String> {
