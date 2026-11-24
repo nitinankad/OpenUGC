@@ -31,6 +31,9 @@ pub struct Script {
     /// Words of the hook drawn in the highlight colour ("" for none).
     pub accent: String,
     pub plug: Option<DrawnSlide>,
+    /// How many of the last `slides` are turn slides (leading from the problem into the plug).
+    #[serde(default)]
+    pub turn: usize,
 }
 
 const WRITE_INSTRUCTIONS: &str = "\
@@ -38,27 +41,36 @@ You write TikTok photo slideshows for a relatable mental-health and adult-life a
 
 The slideshow:
 1. Hook: the title slide, like \"Hidden signs of loneliness\", \"5 signs of high functioning depression\", \"Things you do when you have no close friends\". At most 60 characters. If it has a number, it must equal the number of points.
-2. Points: specific, relatable signs, habits or feelings about the topic, one per slide. Write them in second person (\"You feel like no one really knows you\") or as a gerund (\"Feeling like a burden when reaching out first\"). 25 to 120 characters each. Concrete everyday moments, not clinical definitions. Vary how they start. No numbering.
-3. Plug (only when the account has an app): the last slide recommends the account's app like a friend would: name the app and say how it helps with this exact topic, in one or two sentences, at most 170 characters. Only claim what the app's description supports. No hype words, no \"link in bio\", no prices.
+2. Points: specific, relatable signs, habits or feelings about the topic, one per slide. Write them in second person (\"You feel like no one really knows you\") or as a gerund (\"Feeling like a burden when reaching out first\"). 25 to 120 characters each. Concrete everyday moments, not clinical definitions. Vary how they start. No numbering. Order them so they build: from small, recognisable habits to the deeper feeling underneath.
+3. Turn (only when the account has an app): 1 or 2 slides that shift from the problem towards what actually helps, without naming or describing any app. Name the small change that made a difference, in plain human terms, and make it the thing the app makes easy. Example of the shape only, for a burnout slideshow and a habit-tracking app: \"What finally helped was noticing the small days I actually got through\", then \"Seeing the good days add up, even the quiet ones\". Write your own lines from this topic and this app's description; never copy the example. Same length and voice as the points, first person or second person. Not a sign, not advice from an expert, no \"you should\".
+4. Plug (only when the account has an app): the last slide introduces the app as the way you found to do what the turn described, like a friend would: \"That's why I started using <app>\" or \"<app> is where I found that\", then one short line on how it helps with this topic. One or two sentences, at most 170 characters. Only claim what the app's description supports. No hype words, no \"link in bio\", no prices.
+
+The arc should feel gradual: the points make people feel seen, the turn gives them hope and hints at the answer, and only then the plug names the app. Never mention the app, or apps in general, before the plug.
 
 Rules for all text: sentence case, plain words, no emojis, no hashtags, no quotes, no exclamation marks. Stay on everyday struggles like loneliness, friendships, burnout, overthinking and self-worth. Never mention self-harm, suicide, eating disorders, medication or diagnosis.
 
 Accent: one to three words of the hook that name the topic (like \"loneliness\"). They are drawn in red, and must appear in the hook exactly as written.
 
-Scene: for every slide, describe its drawing in one sentence of 8 to 25 words: one simple moment with one or two stick figures and at most two props, with a pose or expression that shows the feeling. No words, letters or numbers in the scene. For the plug, show someone calmer or connecting with others while using their phone.
+Scene: for every slide, describe its drawing in one sentence of 8 to 25 words: one simple moment with one or two stick figures and at most two props, with a pose or expression that shows the feeling. No words, letters or numbers in the scene. For the turn, show the figure a little lighter: looking up, a small smile, starting to reach out. For the plug, show someone calmer or connecting with others while using their phone.
 
-Don't reuse any hook from the already-used list.
+Don't reuse any hook from the already-used list, and don't reuse or closely reword any line from the already-used lines. Every slideshow on the account should feel new.
 
 Reply with only this JSON and nothing else:
-{\"hook\": {\"text\": \"...\", \"scene\": \"...\"}, \"accent\": \"...\", \"points\": [{\"text\": \"...\", \"scene\": \"...\"}], \"plug\": {\"text\": \"...\", \"scene\": \"...\"}}
-Set \"plug\" to null when the account has no app.";
+{\"hook\": {\"text\": \"...\", \"scene\": \"...\"}, \"accent\": \"...\", \"points\": [{\"text\": \"...\", \"scene\": \"...\"}], \"turn\": [{\"text\": \"...\", \"scene\": \"...\"}], \"plug\": {\"text\": \"...\", \"scene\": \"...\"}}
+Set \"turn\" to [] and \"plug\" to null when the account has no app.";
 
 pub struct WriteBrief<'a> {
     pub topic: &'a str,
     pub points: usize,
     pub own_app: Option<&'a AppInfo>,
+    /// Hooks from this account's other posts.
     pub used: &'a [String],
+    /// Every other line (points, turn slides, plugs) from this account's other posts.
+    pub used_lines: &'a [String],
 }
+
+/// Keeps the prompt a sensible size when an account has many posts (newest lines come first).
+const MAX_USED_LINES: usize = 150;
 
 fn brief(b: &WriteBrief) -> String {
     let mut s = format!("Topic: {}\nNumber of points: {}\n", b.topic.trim(), b.points);
@@ -67,10 +79,24 @@ fn brief(b: &WriteBrief) -> String {
             let about: String = a.description.chars().take(1500).collect();
             s.push_str(&format!("The account's app: {} ({}). App Store description:\n{}\n", a.track_name, a.primary_genre_name, about));
         }
-        None => s.push_str("The account has no app, so set plug to null.\n"),
+        None => s.push_str("The account has no app, so set turn to [] and plug to null.\n"),
     }
     if !b.used.is_empty() {
         s.push_str(&format!("Already-used hooks: {}\n", b.used.join("; ")));
+    }
+    let lines: Vec<String> = b
+        .used_lines
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .take(MAX_USED_LINES)
+        .map(|l| l.chars().take(170).collect())
+        .collect();
+    if !lines.is_empty() {
+        s.push_str("Lines already used in this account's earlier posts. Don't reuse any of them or reword them closely; find new moments, new turns and new wording for the plug:\n");
+        for l in lines {
+            s.push_str(&format!("- {l}\n"));
+        }
     }
     s
 }
@@ -86,6 +112,9 @@ pub fn write_script(b: &WriteBrief, writer: Writer) -> Result<Script> {
     };
     let mut script = parse_script(&raw)?;
     if b.own_app.is_none() {
+        // Turn slides only lead into the plug, so they go with it.
+        script.slides.truncate(script.slides.len() - script.turn);
+        script.turn = 0;
         script.plug = None;
     }
     Ok(script)
@@ -107,6 +136,8 @@ fn parse_script(raw: &str) -> Result<Script> {
         #[serde(default)]
         points: Vec<Part>,
         #[serde(default)]
+        turn: Vec<Part>,
+        #[serde(default)]
         plug: Option<Part>,
     }
     let json = match (raw.find('{'), raw.rfind('}')) {
@@ -125,7 +156,11 @@ fn parse_script(raw: &str) -> Result<Script> {
     let accent = clean(&out.accent);
     let accent = if !accent.is_empty() && slides[0].text.to_lowercase().contains(&accent.to_lowercase()) { accent } else { String::new() };
     let plug = out.plug.as_ref().map(slide).filter(|p| !p.text.is_empty());
-    Ok(Script { slides, accent, plug })
+    // The turn slides sit between the points and the plug; without a plug they'd lead nowhere.
+    let turn: Vec<DrawnSlide> = if plug.is_some() { out.turn.iter().take(2).map(slide).filter(|s| !s.text.is_empty()).collect() } else { vec![] };
+    let turn_len = turn.len();
+    slides.extend(turn);
+    Ok(Script { slides, accent, plug, turn: turn_len })
 }
 
 // ---------------------------------------------------------------------------
@@ -172,21 +207,29 @@ pub fn draw(scene: &str, artist: Writer, style_ref: Option<&Path>, out_dir: &Pat
 }
 
 fn draw_with_codex(scene: &str, style_ref: Option<&Path>) -> Result<image::DynamicImage> {
+    let mut prompt = format!(
+        "Use your image generation tool to create exactly one image.\n\nStyle: {STYLE}\n\nScene: {}\n\n",
+        scene.trim()
+    );
+    let refs: Vec<(&Path, &str)> = style_ref.map(|p| (p, "style.png")).into_iter().collect();
+    if !refs.is_empty() {
+        prompt.push_str("style.png in this folder is another drawing from the same slideshow. Match its line weight and drawing style exactly, but draw the new scene, not its content.\n\n");
+    }
+    prompt.push_str("Save the finished image in the current folder as drawing.png, then reply with only the word done.");
+    codex_image(&prompt, &refs)
+}
+
+/// Runs Codex in a fresh temp folder (with `files` copied in under the given names) and returns
+/// the image it generated. The prompt should ask for it to be saved as drawing.png.
+pub(crate) fn codex_image(prompt: &str, files: &[(&Path, &str)]) -> Result<image::DynamicImage> {
     static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("openugc-draw-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
-    let has_ref = style_ref.is_some_and(|p| std::fs::copy(p, dir.join("style.png")).is_ok());
-
-    let mut prompt = format!(
-        "Use your image generation tool to create exactly one image.\n\nStyle: {STYLE}\n\nScene: {}\n\n",
-        scene.trim()
-    );
-    if has_ref {
-        prompt.push_str("style.png in this folder is another drawing from the same slideshow. Match its line weight and drawing style exactly, but draw the new scene, not its content.\n\n");
+    for (src, name) in files {
+        let _ = std::fs::copy(src, dir.join(name));
     }
-    prompt.push_str("Save the finished image in the current folder as drawing.png, then reply with only the word done.");
 
     let started = SystemTime::now();
     let args = [
@@ -195,10 +238,11 @@ fn draw_with_codex(scene: &str, style_ref: Option<&Path>) -> Result<image::Dynam
         "--sandbox", "workspace-write",
         "--ephemeral",
         "--color", "never",
+        "-m", prepare::CODEX_MODEL,
         "-c", "model_reasoning_effort=low",
         "-",
     ];
-    let result = prepare::run_cli("codex", &args, &prompt, Some(&dir)).and_then(|_| {
+    let result = prepare::run_cli("codex", &args, prompt, Some(&dir)).and_then(|_| {
         let saved = dir.join("drawing.png");
         let path = if saved.exists() { saved } else { newest_codex_image(started).context("Codex didn't make an image. Check that `codex` is logged in and image generation is on (codex features list).")? };
         image::open(&path).with_context(|| format!("Couldn't open the drawing at {}", path.display()))
@@ -310,12 +354,62 @@ mod tests {
         assert!(s.plug.is_none());
     }
 
+    #[test]
+    fn brief_lists_used_hooks_and_lines() {
+        let used = ["Hidden signs of loneliness".to_string()];
+        let lines = ["You eat lunch alone".to_string(), "  ".to_string(), "That's why I started using Penpal".to_string()];
+        let s = brief(&WriteBrief { topic: "loneliness", points: 5, own_app: None, used: &used, used_lines: &lines });
+        assert!(s.contains("Already-used hooks: Hidden signs of loneliness"));
+        assert!(s.contains("- You eat lunch alone\n- That's why I started using Penpal\n"));
+        let none = brief(&WriteBrief { topic: "loneliness", points: 5, own_app: None, used: &[], used_lines: &[] });
+        assert!(!none.contains("already used in this account"));
+    }
+
+    #[test]
+    fn turn_slides_go_after_the_points_and_only_with_a_plug() {
+        let raw = "{\"hook\": {\"text\": \"Signs of loneliness\", \"scene\": \"a\"}, \"accent\": \"loneliness\", \
+                   \"points\": [{\"text\": \"You eat lunch alone\", \"scene\": \"b\"}], \
+                   \"turn\": [{\"text\": \"What helped was no pressure to reply\", \"scene\": \"c\"}, {\"text\": \"Writing it down first\", \"scene\": \"d\"}, {\"text\": \"extra\", \"scene\": \"e\"}], \
+                   \"plug\": {\"text\": \"That's why I started using Penpal.\", \"scene\": \"f\"}}";
+        let s = parse_script(raw).unwrap();
+        assert_eq!(s.turn, 2);
+        let texts: Vec<&str> = s.slides.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts, ["Signs of loneliness", "You eat lunch alone", "What helped was no pressure to reply", "Writing it down first"]);
+
+        let no_plug = raw.replace("{\"text\": \"That's why I started using Penpal.\", \"scene\": \"f\"}", "null");
+        let s = parse_script(&no_plug).unwrap();
+        assert_eq!((s.turn, s.slides.len()), (0, 2));
+    }
+
+    /// Writes a script with Claude for the first account's app in your saved state and prints it
+    /// (no drawings): `cargo test write_script_live -- --ignored --nocapture`
+    /// Set OPENUGC_TOPIC to change the topic.
+    #[test]
+    #[ignore]
+    fn write_script_live() {
+        let appdata = std::env::var("APPDATA").unwrap();
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(Path::new(&appdata).join("com.openugc.OpenUGC/state.json")).unwrap()).unwrap();
+        let app: Option<AppInfo> = state["accounts"]
+            .as_array()
+            .and_then(|a| a.iter().find_map(|x| serde_json::from_value(x["myApp"].clone()).ok()));
+        let topic = std::env::var("OPENUGC_TOPIC").unwrap_or_else(|_| "adult friendships".into());
+        let s = write_script(&WriteBrief { topic: &topic, points: 6, own_app: app.as_ref(), used: &[], used_lines: &[] }, Writer::Claude).unwrap();
+        for (i, x) in s.slides.iter().enumerate() {
+            let tag = if i == 0 { "HOOK" } else if i >= s.slides.len() - s.turn { "TURN" } else { "POINT" };
+            println!("{tag:5} {}", x.text);
+        }
+        if let Some(p) = &s.plug {
+            println!("PLUG  {}", p.text);
+        }
+    }
+
     /// Writes with Claude and draws the hook with Codex, using your CLI logins:
     /// `cargo test write_and_draw_live -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn write_and_draw_live() {
-        let brief = WriteBrief { topic: "adult friendships", points: 5, own_app: None, used: &[] };
+        let brief = WriteBrief { topic: "adult friendships", points: 5, own_app: None, used: &[], used_lines: &[] };
         let script = write_script(&brief, Writer::Claude).unwrap();
         for s in &script.slides {
             println!("- {} [{}]", s.text, s.scene);

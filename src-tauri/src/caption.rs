@@ -114,6 +114,40 @@ pub fn generate_drawn_caption(topic: &str, slides: &[String], writer: Writer) ->
     parse(&raw)
 }
 
+const SPOTLIGHT_CAPTION_INSTRUCTIONS: &str = "\
+You write the caption for a TikTok photo slideshow that spotlights a few iPhone apps (sometimes one): a hook, each app's App Store page on a phone, and where to get them.
+
+Rules for the caption:
+- One or two short lines, under 150 characters in total.
+- Casual and natural, like a real person sharing an app they like, not an ad. Lowercase is fine. At most one emoji.
+- Invite people to save the post, try them, or say in the comments which one they'd use. You may name one app once.
+- No hashtags in the caption itself, no quotes, no links, no prices.
+
+Rules for the hashtags:
+- Exactly 5, relevant to what the apps do and who they're for.
+- Mix one or two broad ones people search (like appstore or iphoneapps) with specific ones.
+- Lowercase letters and digits only, no spaces, no '#'.
+
+Reply with only this JSON and nothing else:
+{\"caption\": \"...\", \"hashtags\": [\"...\", \"...\", \"...\", \"...\", \"...\"]}";
+
+/// Caption for the app-spotlight format, from the apps and the slide text.
+pub fn generate_spotlight_caption(apps: &[PreparedApp], slides: &[String], writer: Writer) -> Result<Caption> {
+    let mut prompt = String::from("Apps:\n");
+    for a in apps {
+        prompt.push_str(&format!("- {} ({}): {}\n", a.app.track_name, a.app.primary_genre_name, a.overview.trim()));
+    }
+    prompt.push_str("\nSlides, in order (the first is the hook):\n");
+    for (i, l) in slides.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).enumerate() {
+        prompt.push_str(&format!("{}. {l}\n", i + 1));
+    }
+    let raw = match writer {
+        Writer::Claude => prepare::run_claude(SPOTLIGHT_CAPTION_INSTRUCTIONS, &prompt)?,
+        Writer::Codex => prepare::run_codex(SPOTLIGHT_CAPTION_INSTRUCTIONS, &prompt)?,
+    };
+    parse(&raw)
+}
+
 /// Pulls the JSON object out of the reply (models sometimes wrap it in a code fence)
 /// and cleans the hashtags.
 fn parse(raw: &str) -> Result<Caption> {

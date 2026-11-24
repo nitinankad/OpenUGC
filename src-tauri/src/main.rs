@@ -11,6 +11,7 @@ mod prepare;
 mod r2;
 mod settings;
 mod slides;
+mod spotlight;
 mod suggest;
 
 use appstore::{AppInfo, GemFilter};
@@ -117,9 +118,17 @@ async fn suggest_hooks(
 }
 
 #[tauri::command]
-async fn write_drawn(topic: String, points: usize, own_app: Option<AppInfo>, used: Vec<String>, writer: Writer) -> CmdResult<drawn::Script> {
+async fn write_drawn(
+    topic: String,
+    points: usize,
+    own_app: Option<AppInfo>,
+    used: Vec<String>,
+    used_lines: Option<Vec<String>>,
+    writer: Writer,
+) -> CmdResult<drawn::Script> {
+    let used_lines = used_lines.unwrap_or_default();
     blocking(move || {
-        let brief = drawn::WriteBrief { topic: &topic, points: points.clamp(3, 9), own_app: own_app.as_ref(), used: &used };
+        let brief = drawn::WriteBrief { topic: &topic, points: points.clamp(3, 9), own_app: own_app.as_ref(), used: &used, used_lines: &used_lines };
         drawn::write_script(&brief, writer)
     })
     .await
@@ -170,6 +179,96 @@ async fn render_drawn(
 #[tauri::command]
 async fn generate_drawn_caption(topic: String, slides: Vec<String>, writer: Writer) -> CmdResult<Caption> {
     blocking(move || caption::generate_drawn_caption(&topic, &slides, writer)).await
+}
+
+#[tauri::command]
+async fn write_spotlight(
+    apps: Vec<PreparedApp>,
+    used_hooks: Vec<String>,
+    used_lines: Vec<String>,
+    writer: Writer,
+) -> CmdResult<spotlight::Script> {
+    blocking(move || {
+        if apps.is_empty() {
+            return Err(anyhow::anyhow!("Prepare the post's apps first."));
+        }
+        let brief = spotlight::WriteBrief { apps: &apps, used_hooks: &used_hooks, used_lines: &used_lines };
+        spotlight::write_script(&brief, writer)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn render_spotlight(app: AppHandle, prepared: Vec<PreparedApp>, spot: slides::Spotlight, desk: PathBuf) -> CmdResult<RenderedSlideshow> {
+    let stamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string();
+    let dir = data_dir(&app)?.join("slideshows").join(stamp);
+    blocking(move || {
+        let marked = spotlight::marked_quad(&desk);
+        slides::render_spotlight(&prepared, &spot, &desk, marked, &dir)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn generate_spotlight_caption(prepared: Vec<PreparedApp>, slides: Vec<String>, writer: Writer) -> CmdResult<Caption> {
+    blocking(move || caption::generate_spotlight_caption(&prepared, &slides, writer)).await
+}
+
+/// Desk photos and how each one's phone screen is found. Detecting a new photo's screen
+/// takes a moment, so this runs off the main thread.
+#[tauri::command]
+async fn list_desks(app: AppHandle) -> CmdResult<Vec<spotlight::DeskInfo>> {
+    let root = data_dir(&app)?;
+    blocking(move || Ok(spotlight::list_desks(&root))).await
+}
+
+/// Copies photos (dropped onto the window) into the desks folder.
+#[tauri::command]
+async fn add_desks(app: AppHandle, paths: Vec<PathBuf>) -> CmdResult<Vec<PathBuf>> {
+    let root = data_dir(&app)?;
+    blocking(move || spotlight::add_desks(&root, &paths)).await
+}
+
+/// Copies your own screenshots (dropped onto a spotlight slide) into the data folder.
+#[tauri::command]
+async fn add_screenshots(app: AppHandle, paths: Vec<PathBuf>) -> CmdResult<Vec<PathBuf>> {
+    let root = data_dir(&app)?;
+    blocking(move || spotlight::add_screenshots(&root, &paths)).await
+}
+
+/// Saves one screenshot picked with the file picker. The body is the file's raw bytes.
+#[tauri::command]
+fn save_screenshot(app: AppHandle, request: tauri::ipc::Request<'_>) -> CmdResult<PathBuf> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the screenshot's bytes.".into());
+    };
+    spotlight::save_screenshot(&data_dir(&app)?, bytes).map_err(|e| format!("{e:#}"))
+}
+
+/// Saves the screen corners clicked on a desk photo; `corners: null` goes back to automatic.
+#[tauri::command]
+async fn set_desk_screen(app: AppHandle, desk: PathBuf, corners: Option<[[f32; 2]; 4]>) -> CmdResult<spotlight::DeskScreen> {
+    // Only photos in the desks folder, so this can't write next to any other file.
+    let dir = spotlight::desks_dir(&data_dir(&app)?);
+    if desk.parent() != Some(dir.as_path()) {
+        return Err("That photo isn't in the desks folder.".into());
+    }
+    blocking(move || spotlight::set_screen(&desk, corners)).await
+}
+
+/// Makes a new desk photo with Codex image generation (Claude can't make images).
+#[tauri::command]
+async fn make_desk(app: AppHandle) -> CmdResult<PathBuf> {
+    let root = data_dir(&app)?;
+    blocking(move || spotlight::make_desk(&root)).await
+}
+
+#[tauri::command]
+fn open_desks_folder(app: AppHandle) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = spotlight::desks_dir(&data_dir(&app)?);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    app.opener().open_path(dir.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -281,6 +380,16 @@ fn main() {
             draw_scene,
             render_drawn,
             generate_drawn_caption,
+            write_spotlight,
+            render_spotlight,
+            generate_spotlight_caption,
+            list_desks,
+            add_desks,
+            add_screenshots,
+            save_screenshot,
+            set_desk_screen,
+            make_desk,
+            open_desks_folder,
             get_settings,
             save_settings,
             export_settings,

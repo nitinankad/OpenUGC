@@ -18,8 +18,11 @@ const DEFAULT_SLIDE_OPTIONS = {
 };
 
 /** Slideshow formats. Each account picks one; each post keeps the format it was made with. */
-const FORMATS = { gems: "Hidden gem apps", drawn: "Relatable drawings" };
+const FORMATS = { gems: "Hidden gem apps", drawn: "Relatable drawings", spotlight: "App spotlight" };
 const DEFAULT_DRAWN_STYLE = { background: "#faf9f6", text: "#111111", accent: "#e0201b" };
+/** App spotlight: screenshot slides by default, and the look that carries over between posts. */
+const DEFAULT_SPOT_COUNT = 3;
+const DEFAULT_SPOT_LOOK = { windowTitle: "Notes", color: "#0a84ff" };
 const DEFAULT_POINTS = 6;
 /** Drawings made at once; each is a separate Codex or Claude run. */
 const DRAW_PARALLEL = 3;
@@ -48,6 +51,7 @@ const state = {
    * phone (after Send to phone): { folder, url, sentAt, renderedAt, text } (renderedAt and text are what was sent)
    * posted (marked by you): { at, link? }
    * drawn (relatable drawings only): { topic, points, accent, slides: [{ id, text, scene, image }], plug, style }
+   * spotlight (app spotlight only): { hook, accent, lines: [{ id, trackId, text, shot, image }] (one per app), cta, windowTitle, color, desk }
    */
   posts: [],
   currentPostId: null,
@@ -75,6 +79,15 @@ const ui = {
   editingAccount: null,
   /** Delete button waiting for a second click, e.g. "post:<id>". */
   confirm: null,
+  /** App spotlight: desk photos ({ path, screen, width, height }), and what's running. */
+  desks: [],
+  desksLoaded: false,
+  spotWriting: false,
+  makingDesk: false,
+  /** Ids of spotlight slides whose own screenshot is being saved. */
+  uploading: new Set(),
+  /** Marking a desk's screen: { path, width, height, points: [[x, y]] in photo pixels }. */
+  marking: null,
 };
 
 /* ---------- helpers ---------- */
@@ -111,14 +124,19 @@ const mySlot = () => acct()?.myAppSlot || 3;
 const isPicked = (id) => picked().some((a) => a.trackId === id);
 const preparedFor = (id) => state.prepared.find((p) => p.app.trackId === id);
 const isMine = (id) => myApp()?.trackId === id;
-/** How many gems fit next to the account's own app. */
-const gemCapacity = () => MAX_APPS - (myApp() ? 1 : 0);
-
-const formatOf = (p) => (p?.format === "drawn" ? "drawn" : "gems");
+const formatOf = (p) => (FORMATS[p?.format] ? p.format : "gems");
+const cleanFormat = (f) => (FORMATS[f] ? f : "gems");
 const isDrawn = (p = post()) => formatOf(p) === "drawn";
 const drawnOf = (p = post()) => p?.drawn || null;
+const isSpot = (p = post()) => formatOf(p) === "spotlight";
+const spotOf = (p = post()) => p?.spotlight || null;
+/** Apps a post holds. */
+const maxApps = () => MAX_APPS;
+/** How many gems fit next to the account's own app. */
+const gemCapacity = () => maxApps() - (myApp() ? 1 : 0);
 /** The headline a post goes out with, whatever its format. */
-const postHook = (p) => (isDrawn(p) ? drawnOf(p)?.slides?.[0]?.text?.trim() || "" : hookText(p.slideOptions));
+const postHook = (p) =>
+  isDrawn(p) ? drawnOf(p)?.slides?.[0]?.text?.trim() || "" : isSpot(p) ? spotOf(p)?.hook?.trim() || "" : hookText(p.slideOptions);
 
 /** Every app in a post, in slide order: the gems with the account's app at its chosen position. */
 function lineupFor(p) {
@@ -184,7 +202,11 @@ function setView(view) {
   if (view === "board") renderBoard();
   if (view === "analytics") loadAnalytics();
   else clearTimeout(pollTimer);
-  if (view === "slides") renderSlides();
+  if (view === "slides") {
+    renderSlides();
+    // Pick up photos added to the desks folder since last time.
+    if (isSpot()) loadDesks();
+  }
   if (view === "settings") renderSettings();
   if (view === "find") {
     $("#niche").value = post()?.niche || "";
@@ -200,9 +222,12 @@ function renderRail() {
   const p = post();
   $("#rail-post").hidden = !p;
   const fmt = formatOf(p);
+  // The hook ideas in Find are list hooks ("6 apps for…"); a spotlight writes its own in Slides.
+  $(".hook-start").hidden = isSpot(p);
+  $("#find-title").textContent = isSpot(p) ? "Find apps to spotlight" : "Find hidden gems";
   document.querySelectorAll(".nav-step").forEach((b) => {
     b.disabled = !p;
-    if (b.dataset.format) b.hidden = b.dataset.format !== fmt;
+    if (b.dataset.format) b.hidden = !b.dataset.format.split(" ").includes(fmt);
   });
   if (!p) return;
   $("#rail-account").textContent = handle(acct());
@@ -221,8 +246,8 @@ function postStatus(p) {
     const drawn = s.filter((x) => x.image).length;
     return { cls: "", label: "Draft", detail: s.length ? `${drawn} of ${s.length} slides drawn` : "Not written yet" };
   }
-  const n = lineupFor(p).length;
-  return { cls: "", label: "Draft", detail: n ? `${n} of ${MAX_APPS} apps` : "No apps yet" };
+  const lu = lineupFor(p);
+  return { cls: "", label: "Draft", detail: lu.length ? `${lu.length} of ${MAX_APPS} apps` : "No apps yet" };
 }
 
 function accountForm(a) {
@@ -309,7 +334,7 @@ function renderBoard() {
 function newPost(accountId) {
   const a = state.accounts.find((x) => x.id === accountId);
   if (!a) return;
-  const format = a.format === "drawn" ? "drawn" : "gems";
+  const format = cleanFormat(a.format);
   // Carry the account's look over from its latest post of the same format, and bump the part number.
   const prev = postsOf(a).filter((q) => formatOf(q) === format).at(-1);
   const slideOptions = prev ? { ...prev.slideOptions } : { ...DEFAULT_SLIDE_OPTIONS };
@@ -324,6 +349,8 @@ function newPost(accountId) {
       format === "drawn"
         ? { topic: "", points: prev?.drawn?.points || DEFAULT_POINTS, accent: "", slides: [], plug: null, style: { ...DEFAULT_DRAWN_STYLE, ...(prev?.drawn?.style || {}) } }
         : undefined,
+    // A new spotlight starts with blank words and lets Make slides pick a desk; the window look carries over.
+    spotlight: format === "spotlight" ? newSpotlight(prev?.spotlight) : undefined,
     name: `Post ${postsOf(a).length + 1}`,
     createdAt: Date.now(),
     niche: "",
@@ -341,6 +368,19 @@ function newPost(accountId) {
   save();
 }
 
+function newSpotlight(prev) {
+  return {
+    count: prev?.count || DEFAULT_SPOT_COUNT,
+    hook: "",
+    accent: "",
+    lines: [],
+    cta: "",
+    windowTitle: prev?.windowTitle ?? DEFAULT_SPOT_LOOK.windowTitle,
+    color: prev?.color || DEFAULT_SPOT_LOOK.color,
+    desk: null,
+  };
+}
+
 function openPost(id, view) {
   const p = state.posts.find((x) => x.id === id);
   if (!p) return;
@@ -356,7 +396,7 @@ function saveAccountForm(form) {
   const id = form.dataset.acctForm;
   const username = cleanUsername(form.username.value);
   if (!username) return toast("Enter the TikTok username for this account.", true);
-  const format = form.format?.value === "drawn" ? "drawn" : "gems";
+  const format = cleanFormat(form.format?.value);
   if (id === "new") {
     const first = state.accounts[0];
     state.accounts.push({
@@ -611,7 +651,8 @@ async function addByLinks() {
     }
     const parts = [];
     if (added.length) parts.push(`Added ${added.length} app${added.length === 1 ? "" : "s"} to this post`);
-    if (skipped.length) parts.push(`${skipped.length} didn't fit (six apps max), so they're in the list to swap in`);
+    if (skipped.length)
+      parts.push(`${skipped.length} didn't fit (${MAX_APPS} apps max), so they're in the list to swap in`);
     if (out.notFound.length) parts.push(`not found on the App Store: ${out.notFound.join(", ")}`);
     if (out.invalid.length) parts.push(`not App Store links: ${out.invalid.slice(0, 3).join(", ")}${out.invalid.length > 3 ? "…" : ""}`);
     const bad = !out.apps.length;
@@ -742,11 +783,14 @@ function bindSlotMenu() {
 function renderTray() {
   const p = post();
   const drawnMode = isDrawn(p);
-  $(".phone").hidden = drawnMode;
+  const spotMode = isSpot(p);
+  $(".phone").hidden = drawnMode || spotMode;
   $("#dprev").hidden = !drawnMode;
+  $("#sprev").hidden = !spotMode;
   $("#artist-row").hidden = !drawnMode;
-  $("#writer-label").textContent = drawnMode ? "Writing by" : "Overviews by";
+  $("#writer-label").textContent = drawnMode ? "Writing by" : spotMode ? "Writing by" : "Overviews by";
   if (drawnMode) return renderDrawnTray(p);
+  if (spotMode) return renderSpotTray(p);
   const apps = lineup();
   const mine = myApp();
   // On the phone, your app sits in its chosen slot even before the gems around it are added.
@@ -805,6 +849,42 @@ function renderTray() {
   });
   closeSlotMenu(false);
 
+  const btn = $("#prepare-btn");
+  btn.disabled = todo === 0;
+  btn.textContent = working
+    ? `Preparing ${working} app${working > 1 ? "s" : ""}`
+    : todo
+      ? `Prepare ${todo} app${todo > 1 ? "s" : ""}`
+      : n
+        ? "All apps prepared"
+        : "Prepare apps";
+}
+
+/** The tray for a spotlight: its hook window over the desk, and the Prepare button for its apps. */
+function renderSpotTray(p) {
+  const s = spotOf(p);
+  const desk = deskFor(p);
+  const img = $("#sprev-desk");
+  img.hidden = !desk;
+  if (desk && img.dataset.path !== desk.path) {
+    img.src = fileSrc(desk.path);
+    img.dataset.path = desk.path;
+  }
+  $("#sprev-title").textContent = s?.windowTitle || "";
+  $("#sprev-text").innerHTML = s?.hook?.trim()
+    ? accentHtml(s.hook.trim(), s.accent, s.color)
+    : `<span class="dprev-empty">Your hook shows here</span>`;
+  $("#mine").hidden = !p;
+  $("#tray-repeats").hidden = true;
+  closeSlotMenu(false);
+
+  const apps = lineup();
+  const n = apps.length;
+  const todo = apps.filter((a) => !preparedFor(a.trackId) && !ui.busy.has(a.trackId)).length;
+  const working = apps.filter((a) => ui.busy.has(a.trackId)).length;
+  $("#tray-status").textContent = n
+    ? `${n} app${n > 1 ? "s" : ""}: ${apps.map((a) => shortAppName(a.trackName)).join(", ")}`
+    : "Add apps to spotlight in Find apps.";
   const btn = $("#prepare-btn");
   btn.disabled = todo === 0;
   btn.textContent = working
@@ -936,7 +1016,7 @@ function findDrawnSlide(id, p = post()) {
   const d = drawnOf(p);
   return d?.slides.find((s) => s.id === id) || (d?.plug?.id === id ? d.plug : null);
 }
-const newDrawnSlide = (s = {}) => ({ id: uid(), text: s.text || "", scene: s.scene || "", image: s.image || null });
+const newDrawnSlide = (s = {}) => ({ id: uid(), text: s.text || "", scene: s.scene || "", image: s.image || null, ...(s.turn ? { turn: true } : {}) });
 
 /** The text with its accent words in the highlight colour, as on the slide. */
 function accentHtml(text, accent, color) {
@@ -992,11 +1072,13 @@ function renderWrite() {
       : o.plug
         ? `<button type="button" class="btn btn-quiet" data-remove-plug>Remove</button>`
         : "";
+    // The hook has its own repeat note above the list.
+    const rep = o.hook ? null : lineRepeat(s.text, p);
     return `<li class="dslide" data-id="${s.id}">
       <div class="dslide-art" style="background:${esc(d.style.background)}">${art}</div>
       <div class="dslide-body">
         <div class="dslide-top">
-          <span class="dslide-label">${esc(label)}</span>
+          <span class="dslide-label">${esc(label)}${rep ? ` <span class="repeat is-recent" title="Reword it so the account doesn't repeat itself">also in ${esc(rep.name)}</span>` : ""}</span>
           <span class="dslide-actions">
             <button type="button" class="btn btn-quiet" data-draw="${s.id}" ${busy || !s.scene.trim() ? "disabled" : ""}>${busy ? (active ? "Drawing" : "Waiting") : s.image ? "Redraw" : "Draw"}</button>
             ${moves}
@@ -1012,7 +1094,7 @@ function renderWrite() {
   let html = "";
   if (ui.writing && !has) html = `<li class="loading-row"><span class="spinner"></span>${esc(writer)} is writing a slideshow about ${esc(d.topic)}</li>`;
   html += d.slides
-    .map((s, i) => item(s, i === 0 ? "Hook" : `Slide ${i + 1}`, { hook: i === 0, point: i > 0, idx: i, last: i === d.slides.length - 1 }))
+    .map((s, i) => item(s, i === 0 ? "Hook" : s.turn ? `Slide ${i + 1}, leads into your app` : `Slide ${i + 1}`, { hook: i === 0, point: i > 0, idx: i, last: i === d.slides.length - 1 }))
     .join("");
   if (has) {
     const mineApp = acct()?.myApp;
@@ -1049,10 +1131,12 @@ async function writeDrawn() {
   try {
     const used = usedHooks(p);
     if (d.slides[0]?.text) used.push(d.slides[0].text);
-    const r = await invoke("write_drawn", { topic, points: d.points, ownApp: ownAppOf(p), used, writer: state.writer });
+    const r = await invoke("write_drawn", { topic, points: d.points, ownApp: ownAppOf(p), used, usedLines: usedLines(p), writer: state.writer });
     // Drawings still on their way belong to the old slides.
     ui.drawQueue = ui.drawQueue.filter((j) => j.postId !== p.id);
-    d.slides = r.slides.map(newDrawnSlide);
+    // The last r.turn slides lead from the problem into the plug.
+    const firstTurn = r.slides.length - (r.turn || 0);
+    d.slides = r.slides.map((s, i) => newDrawnSlide({ ...s, turn: i >= firstTurn }));
     d.accent = r.accent || "";
     d.plug = r.plug ? newDrawnSlide(r.plug) : null;
     save();
@@ -1226,8 +1310,11 @@ function renderSlideSettings() {
 function renderSlides() {
   const p = post();
   const drawnMode = isDrawn(p);
-  $("#slide-settings").hidden = drawnMode;
+  const spotMode = isSpot(p);
+  $("#slide-settings").hidden = drawnMode || spotMode;
   $("#drawn-settings").hidden = !drawnMode;
+  $("#spot-settings").hidden = !spotMode;
+  if (spotMode) return renderSpotSlides(p);
   const apps = slideApps();
   const written = drawnSlides(p).filter((s) => s.text.trim());
   const bare = written.filter((s) => !s.image).length;
@@ -1245,21 +1332,532 @@ function renderSlides() {
   btn.disabled = ui.rendering || !(drawnMode ? written.length : apps.length);
   btn.textContent = ui.rendering ? "Making slides" : p?.slides ? "Make slides again" : "Make slides";
 
-  const last = p?.slides;
   const plugLast = drawnMode && !!activePlug(p);
+  renderThumbs(p, (i, end) => (i === 0 ? "Hook" : drawnMode ? (end && plugLast ? "Your app" : `Slide ${i + 1}`) : end ? "Last slide" : `App ${i}`));
+  renderHookIdeas();
+  renderPost();
+}
+
+/** The made slides, each with a label from `label(index, isLast)`. */
+function renderThumbs(p, label) {
+  const last = p?.slides;
   $("#show-folder").hidden = !last;
   $("#slides-empty").hidden = !!last;
   $("#thumbs").innerHTML = last
     ? last.slides
         .map((s, i) => {
-          const end = i === last.slides.length - 1;
-          const label = i === 0 ? "Hook" : drawnMode ? (end && plugLast ? "Your app" : `Slide ${i + 1}`) : end ? "Last slide" : `App ${i}`;
-          return `<li><figure><img src="${esc(fileSrc(s))}?v=${last.renderedAt}" alt="${label}" /><figcaption>${i + 1}. ${label}</figcaption></figure></li>`;
+          const name = label(i, i === last.slides.length - 1);
+          return `<li><figure><img src="${esc(fileSrc(s))}?v=${last.renderedAt}" alt="${esc(name)}" /><figcaption>${i + 1}. ${esc(name)}</figcaption></figure></li>`;
         })
         .join("")
     : "";
-  renderHookIdeas();
+}
+
+/* ---------- App spotlight ---------- */
+/** The spotlight's apps, prepared, in slide order; null until every one is prepared. */
+const spotApps = (p = post()) => {
+  const apps = lineupFor(p).map((a) => preparedFor(a.trackId));
+  return apps.length && apps.every(Boolean) ? apps : null;
+};
+/**
+ * Keeps one slide per app in the post, in slide order. A slide stays with its app (by trackId)
+ * when apps are reordered; slides from before that (no trackId) go to apps in order.
+ */
+function syncSpotLines(p) {
+  const s = spotOf(p);
+  if (!s) return [];
+  const apps = lineupFor(p);
+  const loose = s.lines.filter((l) => !l.trackId);
+  const next = apps.map((a) => s.lines.find((l) => l.trackId === a.trackId) || { ...(loose.shift() || newSpotLine()), trackId: a.trackId });
+  const changed = next.length !== s.lines.length || next.some((l, i) => l !== s.lines[i]);
+  if (changed) {
+    s.lines = next;
+    save();
+  }
+  return s.lines;
+}
+/** The desk photo this post uses, if it's still in the desks folder. */
+const deskFor = (p = post()) => ui.desks.find((d) => d.path === spotOf(p)?.desk) || null;
+const deskReady = (d) => d?.screen?.source === "green" || d?.screen?.source === "marked";
+/** One app's slide. `image` is your own screenshot, shown before App Store screenshot `shot` and the rest. */
+const newSpotLine = (l = {}) => ({
+  id: l.id || uid(),
+  trackId: l.trackId ?? null,
+  text: l.text || "",
+  shot: Number.isInteger(l.shot) && l.shot >= 0 ? l.shot : 0,
+  image: l.image || null,
+});
+
+const spotLines = (q) => (spotOf(q)?.lines || []).map((l) => l.text.trim()).filter(Boolean);
+/** This account's other spotlight posts, newest first, drafts included. */
+const otherSpotPosts = (p) => {
+  const a = accountOf(p);
+  return (a ? postsOf(a) : []).filter((q) => q.id !== p.id && isSpot(q)).sort((x, y) => postTime(y) - postTime(x));
+};
+/** The other spotlight post that already has this line or a close rewording of it. */
+function spotLineRepeat(text, p = post()) {
+  const key = hookKey(text);
+  if (!p || words(text).size < 3) return null;
+  return otherSpotPosts(p).find((q) => spotLines(q).some((l) => hookKey(l) === key || overlap(l, text) >= 0.8)) || null;
+}
+
+async function loadDesks() {
+  try {
+    ui.desks = await invoke("list_desks");
+  } catch (e) {
+    toast(`Couldn't read the desk photos: ${e}`, true);
+  }
+  ui.desksLoaded = true;
+  if (ui.marking && !ui.desks.some((d) => d.path === ui.marking.path)) ui.marking = null;
+  if (isSpot()) {
+    renderSpotSlides(post());
+    renderTray();
+  }
+}
+
+function renderSpotSlides(p) {
+  const s = spotOf(p);
+  if (!s) return;
+  const lines = syncSpotLines(p);
+  const lu = lineupFor(p);
+  const apps = spotApps(p);
+  const writer = WRITER_NAMES[state.writer];
+  // Only a text box counts: a focused button (like Upload) mustn't stop the list updating.
+  const typing = (sel) => document.activeElement?.matches?.("textarea, input[type=text]") && document.activeElement.closest(sel);
+
+  const wbtn = $("#spot-write");
+  const written = s.hook.trim() || lines.some((l) => l.text.trim());
+  wbtn.disabled = ui.spotWriting || !apps;
+  wbtn.textContent = ui.spotWriting ? `${writer} is writing` : written ? `Write again with ${writer}` : `Write with ${writer}`;
+  $("#spot-write-note").textContent = !lu.length
+    ? "Add apps to this post in Find apps first."
+    : !apps
+      ? "Prepare this post's apps first, so the writer can read their descriptions."
+      : written
+        ? "Writing again replaces the words below."
+        : `${writer} writes the hook, a line for each of the ${apps.length} app${apps.length > 1 ? "s" : ""} and the last slide from their descriptions.`;
+  document.querySelectorAll("[data-spot]").forEach((el) => {
+    if (document.activeElement !== el) el.value = s[el.dataset.spot] ?? "";
+  });
+
+  const reps = hookRepeats(s.hook);
+  const rep = $("#spot-repeat");
+  rep.hidden = !reps.length;
+  rep.classList.toggle("is-old", !!reps.length && !isRecent(reps[0]));
+  rep.textContent = reps.length ? `${handle(acct())} already used this hook in ${reps.map(repeatLabel).join("; ")}.` : "";
+
+  // Don't rebuild the list under someone typing in it.
+  if (!typing("#spot-lines")) {
+    $("#spot-lines").innerHTML = lines
+      .map((l, i) => {
+        const info = lu[i];
+        const shots = preparedFor(info?.trackId)?.screenshots || [];
+        const src = l.image || shots[l.shot] || shots[0];
+        const again = spotLineRepeat(l.text, p);
+        const uploading = ui.uploading?.has(l.id);
+        const which = l.image
+          ? `<span class="own-tag">Your screenshot</span>`
+          : shots.length
+            ? `<label>App Store screenshot <select data-spot-shot="${l.id}">${shots.map((_, k) => `<option value="${k}" ${k === l.shot ? "selected" : ""}>${k + 1}</option>`).join("")}</select></label>`
+            : preparedFor(info?.trackId)
+              ? `<span>No App Store screenshots</span>`
+              : `<span>Prepare this app to see its screenshots</span>`;
+        return `<li class="spot-line" data-drop-line="${l.id}">
+          ${src ? `<img class="spot-shot" src="${esc(fileSrc(src))}" alt="${l.image ? "Your screenshot" : `Screenshot ${l.shot + 1}`}" />` : `<span class="spot-shot"></span>`}
+          <div>
+            <div class="spot-line-head">
+              <b>Slide ${i + 2}: ${esc(shortAppName(info?.trackName || ""))}</b>
+              ${which}
+              ${again ? `<span class="repeat is-recent">also in ${esc(again.name)}</span>` : ""}
+            </div>
+            <textarea class="overview" rows="2" data-spot-line="${l.id}" aria-label="Slide ${i + 2} text">${esc(l.text)}</textarea>
+            <div class="spot-line-foot">
+              <button type="button" class="btn btn-quiet btn-xs" data-spot-upload="${l.id}" ${uploading ? "disabled" : ""}>${uploading ? "Uploading" : l.image ? "Replace screenshot" : "Upload screenshot"}</button>
+              ${l.image && shots.length ? `<button type="button" class="link" data-spot-store="${l.id}">Use App Store screenshot</button>` : ""}
+              <span class="spot-drop-hint">or drop an image here</span>
+            </div>
+          </div>
+        </li>`;
+      })
+      .join("");
+  }
+
+  // Desk photos.
+  $("#desk-list").innerHTML = ui.desks
+    .map((d) => {
+      const on = d.path === s.desk;
+      const name = d.path.split(/[\\/]/).pop();
+      return `<li><button type="button" class="desk ${on ? "is-on" : ""}" data-desk="${esc(d.path)}" aria-pressed="${on}" title="${esc(name)}">
+        <img src="${esc(fileSrc(d.path))}" alt="" loading="lazy" />${deskReady(d) ? "" : `<span class="desk-flag">Mark the screen</span>`}
+      </button></li>`;
+    })
+    .join("");
+  $("#desk-empty").textContent = ui.desks.length
+    ? `Drag in more photos, or pick one. ${s.desk ? "" : "With none picked, Make slides chooses one at random."}`
+    : "Drag desk photos here: a phone on a stand, facing the camera. Free stock sites like Pexels and Unsplash have plenty.";
+  const desk = deskFor(p);
+  const markBtn = $("#desk-mark-open");
+  markBtn.disabled = !desk || !!ui.marking;
+  markBtn.textContent = desk?.screen.source === "marked" ? "Mark the screen again" : "Mark the screen";
+  $("#desk-make").disabled = ui.makingDesk;
+  $("#desk-make").textContent = ui.makingDesk ? "Codex is making a desk" : "Make one with Codex";
+  renderMarking();
+
+  $(`[data-scolor]`).value = s.color;
+  const hex = $(`[data-shex]`);
+  if (document.activeElement !== hex) hex.value = s.color;
+
+  const filled = lines.filter((l) => l.text.trim()).length;
+  $("#slides-lede").textContent = apps
+    ? `The hook in a Mac window, then one slide per app (${apps.length}) with its App Store page on a phone on your desk photo, then the last slide. Slides are 2160 × 2700 JPEGs.`
+    : lu.length
+      ? "Prepare this post's apps first, in the panel on the right."
+      : "Add apps to spotlight in Find apps first.";
+  $("#slides-empty p:last-child").textContent = "Write the words and pick a desk photo, then press Make slides.";
+  const btn = $("#make-slides");
+  btn.disabled = ui.rendering || !apps || !s.hook.trim() || filled < lines.length;
+  btn.textContent = ui.rendering ? "Making slides" : p.slides ? "Make slides again" : "Make slides";
+  renderThumbs(p, (i, end) => (i === 0 ? "Hook" : end && s.cta.trim() ? "Last slide" : shortAppName(lu[i - 1]?.trackName || `App ${i}`)));
   renderPost();
+}
+
+/* Marking a desk photo's screen: four clicks on the photo, in photo pixels. */
+function startMarking() {
+  const d = deskFor();
+  if (!d) return;
+  ui.marking = { path: d.path, width: d.width, height: d.height, points: [] };
+  renderSpotSlides(post());
+  $("#desk-mark").scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+/** Points sorted around their centre, so the outline doesn't cross itself. */
+const aroundCentre = (pts) => {
+  const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length;
+  const cy = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+  return [...pts].sort((a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
+};
+
+function renderMarking() {
+  const m = ui.marking;
+  $("#desk-mark").hidden = !m;
+  if (!m) return;
+  const img = $("#desk-mark-img");
+  if (img.dataset.path !== m.path) {
+    img.src = fileSrc(m.path);
+    img.dataset.path = m.path;
+  }
+  const svg = $("#desk-mark-svg");
+  svg.setAttribute("viewBox", `0 0 ${m.width} ${m.height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  const r = Math.max(m.width, m.height) / 110;
+  const pts = m.points;
+  const shape = pts.length > 2 ? aroundCentre(pts) : pts;
+  const outline = pts.length > 1
+    ? `<polygon points="${shape.map((p) => p.join(",")).join(" ")}" fill="rgba(43,196,151,.22)" stroke="#2bc497" stroke-width="${r / 2.5}" />`
+    : "";
+  svg.innerHTML = outline + pts.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="${r}" fill="#2bc497" stroke="#fff" stroke-width="${r / 3}" />`).join("");
+  $("#desk-mark-note").textContent =
+    pts.length < 4
+      ? `Click the ${["first", "second", "third", "fourth"][pts.length]} corner of the phone's screen, right at the edge of the glass. Any order works.`
+      : "If the outline sits on the screen's edges, save it. Start over to redo it.";
+  $("#desk-mark-save").disabled = pts.length < 4;
+  $("#desk-mark-auto").hidden = ui.desks.find((d) => d.path === m.path)?.screen.source !== "marked";
+}
+
+async function saveMarking(corners) {
+  const m = ui.marking;
+  if (!m) return;
+  try {
+    const screen = await invoke("set_desk_screen", { desk: m.path, corners });
+    const d = ui.desks.find((x) => x.path === m.path);
+    if (d) d.screen = screen;
+    ui.marking = null;
+    toast(screen.source === "none" ? "No green screen found in this photo, so mark its corners." : "Saved. This photo is ready to use.", screen.source === "none");
+    if (screen.source === "none") startMarking();
+  } catch (e) {
+    toast(`Couldn't save the corners: ${e}`, true);
+  }
+  renderSpotSlides(post());
+  renderTray();
+}
+
+/** Picks a desk for the post, asking for its screen corners if they aren't known yet. */
+function pickDesk(path) {
+  const s = spotOf();
+  if (!s) return;
+  s.desk = path;
+  ui.marking = null;
+  save();
+  renderSpotSlides(post());
+  renderTray();
+  if (!deskReady(deskFor())) startMarking();
+}
+
+async function addDeskPhotos(paths) {
+  if (!isSpot() || ui.view !== "slides") return toast("Open an app spotlight post's Slides to add desk photos.", true);
+  try {
+    const added = await invoke("add_desks", { paths });
+    await loadDesks();
+    toast(`Added ${added.length} desk photo${added.length === 1 ? "" : "s"}`);
+    if (added[0]) pickDesk(added[0]);
+  } catch (e) {
+    toast(`Couldn't add those photos: ${e}`, true);
+  }
+}
+
+/**
+ * Puts your own screenshot on one app's slide, first in its App Store page. `saveOne` turns the
+ * source (a dropped path or a picked File) into its copy in the app's data folder.
+ */
+async function useOwnScreenshots(lineId, sources, saveOne) {
+  const p = post();
+  const s = spotOf(p);
+  const i = s?.lines.findIndex((l) => l.id === lineId) ?? -1;
+  if (i < 0 || !sources.length) return;
+  ui.uploading.add(lineId);
+  renderSpotSlides(p);
+  try {
+    const path = await saveOne(sources[0]);
+    const l = s.lines.find((x) => x.id === lineId);
+    if (l) l.image = path;
+    toast(`Using your screenshot on slide ${i + 2}`);
+  } catch (e) {
+    toast(`Couldn't use that screenshot: ${e}`, true);
+  } finally {
+    ui.uploading.delete(lineId);
+    save();
+    if (post() === p) renderSpotSlides(p);
+  }
+  if (sources.length > 1) toast("Each slide takes one screenshot of yours, so only the first was used.", true);
+}
+const uploadScreenshot = async (file) => {
+  if (!/^image\/(png|jpeg)$/.test(file.type)) throw `${file.name} isn't a PNG or JPEG`;
+  return invoke("save_screenshot", new Uint8Array(await file.arrayBuffer()));
+};
+const copyScreenshot = async (path) => (await invoke("add_screenshots", { paths: [path] }))[0];
+
+async function makeDesk() {
+  if (ui.makingDesk) return;
+  ui.makingDesk = true;
+  renderSpotSlides(post());
+  try {
+    const path = await invoke("make_desk");
+    await loadDesks();
+    if (isSpot()) pickDesk(path);
+    toast("Codex made a new desk photo");
+  } catch (e) {
+    toast(`Couldn't make a desk photo: ${e}`, true);
+  } finally {
+    ui.makingDesk = false;
+    if (isSpot()) renderSpotSlides(post());
+  }
+}
+
+async function writeSpotlight() {
+  const p = post();
+  const s = spotOf(p);
+  const apps = spotApps(p);
+  if (!s || !apps || ui.spotWriting) return;
+  ui.spotWriting = true;
+  renderSpotSlides(p);
+  try {
+    const r = await invoke("write_spotlight", {
+      apps,
+      usedHooks: usedHooks(p),
+      // Other spotlights' lines, newest first, then this post's (when writing again).
+      usedLines: [...new Set([...otherSpotPosts(p).flatMap(spotLines), ...spotLines(p)])],
+      writer: state.writer,
+    });
+    // New words, but each app's slide keeps the screenshot you chose or uploaded for it.
+    const lines = syncSpotLines(p);
+    Object.assign(s, {
+      hook: r.hook,
+      accent: r.accent,
+      cta: r.cta,
+      lines: lines.map((l, i) => ({ ...l, text: r.lines[i] ?? l.text })),
+    });
+    if (r.lines.length < lines.length) toast(`${WRITER_NAMES[state.writer]} wrote ${r.lines.length} of ${lines.length} app lines. Fill in the rest, or write again.`, true);
+    save();
+  } catch (e) {
+    toast(`Couldn't write the slideshow: ${e}`, true);
+  } finally {
+    ui.spotWriting = false;
+    if (post() === p) renderSpotSlides(p);
+    renderTray();
+  }
+}
+
+async function makeSpotSlides(p) {
+  const s = spotOf(p);
+  const apps = spotApps(p);
+  if (!apps) return toast("Prepare this post's apps first.", true);
+  const lines = syncSpotLines(p);
+  if (!s.hook.trim()) return toast("Write the hook first.", true);
+  const gap = lines.findIndex((l) => !l.text.trim());
+  if (gap >= 0) return toast(`Write the line for slide ${gap + 2} (${shortAppName(apps[gap].app.trackName)}) first.`, true);
+  if (!ui.desksLoaded) await loadDesks();
+  let desk = deskFor(p);
+  if (!desk) {
+    const usable = ui.desks.filter(deskReady);
+    if (!usable.length)
+      return toast(ui.desks.length ? "Mark the phone screen on one of your desk photos first." : "Add a desk photo first: drag one into Desk photo.", true);
+    // A different desk from the account's last spotlight, when there's a choice.
+    const last = otherSpotPosts(p).find((q) => spotOf(q)?.desk)?.spotlight.desk;
+    const pool = usable.length > 1 ? usable.filter((d) => d.path !== last) : usable;
+    desk = pool[Math.floor(Math.random() * pool.length)];
+    s.desk = desk.path;
+  }
+  if (!deskReady(desk)) {
+    startMarking();
+    return toast("Mark the phone screen on this desk photo first.", true);
+  }
+  ui.rendering = true;
+  renderSlides();
+  try {
+    const spot = {
+      hook: s.hook,
+      accent: s.accent,
+      lines: lines.map(({ text, shot, image }) => ({ text, shot, image })),
+      cta: s.cta,
+      windowTitle: s.windowTitle,
+      color: s.color,
+    };
+    const out = await invoke("render_spotlight", { prepared: apps, spot, desk: desk.path });
+    p.slides = { ...out, renderedAt: Date.now() };
+    save();
+    toast(`Made ${out.slides.length} slides`);
+  } catch (e) {
+    toast(`Couldn't make slides: ${e}`, true);
+  } finally {
+    ui.rendering = false;
+    renderAll();
+  }
+}
+
+function bindSpot() {
+  const form = $("#spot-settings");
+  form.addEventListener("submit", (e) => e.preventDefault());
+  const edit = (fn, { rerender = false } = {}) => {
+    const s = spotOf();
+    if (!s) return;
+    fn(s);
+    save();
+    renderTray();
+    renderPost();
+    if (rerender) renderSpotSlides(post());
+  };
+  form.addEventListener("input", (e) => {
+    const t = e.target;
+    if (t.dataset.spot) return edit((s) => (s[t.dataset.spot] = t.value));
+    if (t.dataset.spotLine) return edit((s) => {
+      const l = s.lines.find((x) => x.id === t.dataset.spotLine);
+      if (l) l.text = t.value;
+    });
+  });
+  // Re-check repeats once you've finished typing.
+  form.addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.dataset.spotShot) {
+      return edit((s) => {
+        const l = s.lines.find((x) => x.id === t.dataset.spotShot);
+        if (l) l.shot = Number(t.value) || 0;
+      }, { rerender: true });
+    }
+    if (t.dataset.spot || t.dataset.spotLine) renderSpotSlides(post());
+  });
+  form.addEventListener("click", (e) => {
+    const t = (sel) => e.target.closest(sel);
+    let b;
+    if ((b = t("[data-spot-upload]"))) {
+      const input = $("#spot-file");
+      input.dataset.line = b.dataset.spotUpload;
+      input.value = "";
+      return input.click();
+    }
+    if ((b = t("[data-spot-store]")))
+      return edit((s) => {
+        const l = s.lines.find((x) => x.id === b.dataset.spotStore);
+        if (l) l.image = null;
+      }, { rerender: true });
+    if ((b = t("[data-desk]"))) return pickDesk(b.dataset.desk);
+  });
+  $("#spot-file").addEventListener("change", (e) => {
+    const files = [...e.target.files];
+    if (files.length) useOwnScreenshots(e.target.dataset.line, files, uploadScreenshot);
+  });
+  $("#spot-write").addEventListener("click", writeSpotlight);
+
+  const picker = $("[data-scolor]");
+  const hex = $("[data-shex]");
+  picker.addEventListener("input", () => {
+    hex.value = picker.value;
+    edit((s) => (s.color = picker.value));
+  });
+  hex.addEventListener("input", () => {
+    const v = hex.value.trim().startsWith("#") ? hex.value.trim() : `#${hex.value.trim()}`;
+    if (!HEX.test(v)) return;
+    picker.value = v;
+    edit((s) => (s.color = v.toLowerCase()));
+  });
+  hex.addEventListener("blur", () => (hex.value = spotOf()?.color || DEFAULT_SPOT_LOOK.color));
+
+  $("#desk-folder").addEventListener("click", () => invoke("open_desks_folder").catch((e) => toast(`Couldn't open the folder: ${e}`, true)));
+  $("#desk-make").addEventListener("click", makeDesk);
+  $("#desk-mark-open").addEventListener("click", startMarking);
+  $("#desk-mark-cancel").addEventListener("click", () => {
+    ui.marking = null;
+    renderSpotSlides(post());
+  });
+  $("#desk-mark-reset").addEventListener("click", () => {
+    if (!ui.marking) return;
+    ui.marking.points = [];
+    renderMarking();
+  });
+  $("#desk-mark-save").addEventListener("click", () => ui.marking?.points.length === 4 && saveMarking(ui.marking.points));
+  $("#desk-mark-auto").addEventListener("click", () => saveMarking(null));
+  $("#desk-mark-stage").addEventListener("click", (e) => {
+    const m = ui.marking;
+    if (!m || m.points.length >= 4) return;
+    const r = $("#desk-mark-img").getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * m.width;
+    const y = ((e.clientY - r.top) / r.height) * m.height;
+    m.points.push([Math.round(Math.min(Math.max(x, 0), m.width)), Math.round(Math.min(Math.max(y, 0), m.height))]);
+    renderMarking();
+  });
+
+  // Images dropped onto the window (Tauri hands over their paths): onto a slide they become its
+  // screenshot, onto Desk photo they become desk photos.
+  const dropTarget = (pos) => {
+    if (!pos || !isSpot() || ui.view !== "slides") return null;
+    const el = document.elementFromPoint(pos.x / devicePixelRatio, pos.y / devicePixelRatio);
+    return el?.closest?.("[data-drop-line], #desk-drop") || null;
+  };
+  let lit = null;
+  const light = (el) => {
+    if (lit === el) return;
+    lit?.classList.remove("is-over");
+    el?.classList.add("is-over");
+    lit = el;
+  };
+  window.__TAURI__.webview
+    ?.getCurrentWebview?.()
+    ?.onDragDropEvent((e) => {
+      const { type, paths, position } = e.payload;
+      if (type === "leave") return light(null);
+      const target = dropTarget(position);
+      if (type !== "drop") return light(target);
+      light(null);
+      if (!paths?.length) return;
+      if (!isSpot() || ui.view !== "slides") return toast("Open an app spotlight post's Slides to drop images in.", true);
+      if (!target) return toast("Drop screenshots onto a slide, or desk photos onto Desk photo.", true);
+      if (target.id === "desk-drop") return addDeskPhotos(paths);
+      useOwnScreenshots(target.dataset.dropLine, paths, copyScreenshot);
+    })
+    .catch((e) => console.warn("Drag and drop isn't available:", e));
+  // Photos added to the folder by hand show up when you come back to the app.
+  addEventListener("focus", () => {
+    if (isSpot() && ui.view === "slides") loadDesks();
+  });
 }
 
 /* ---------- Hook ideas ---------- */
@@ -1411,11 +2009,32 @@ function saveCurrentHook() {
 function usedHooks(p) {
   const a = accountOf(p);
   const used = new Set();
-  for (const q of a ? postsOf(a) : []) if (q.id !== p.id && q.slides) used.add(postHook(q));
+  // Written drawings drafts count too, so a batch of posts written together doesn't share hooks.
+  for (const q of a ? postsOf(a) : [])
+    if (q.id !== p.id && (q.slides || (isDrawn(q) && drawnOf(q)?.slides?.length) || (isSpot(q) && spotOf(q)?.hook?.trim()))) used.add(postHook(q));
   for (const h of p.hookIdeas || []) used.add(ideaText(h));
   for (const t of p.seenHooks || []) used.add(t);
   for (const h of a?.savedHooks || []) used.add(ideaText(h));
   return [...used].filter(Boolean);
+}
+
+/** The non-hook lines (points, turn slides, plug) of a drawings post. */
+const bodyLines = (q) => {
+  const d = drawnOf(q);
+  return d ? [...d.slides.slice(1), ...(d.plug ? [d.plug] : [])].map((s) => s.text.trim()).filter(Boolean) : [];
+};
+/** This account's other drawings posts, newest first, drafts included. */
+const otherDrawnPosts = (p) => {
+  const a = accountOf(p);
+  return (a ? postsOf(a) : []).filter((q) => q.id !== p.id && isDrawn(q)).sort((x, y) => postTime(y) - postTime(x));
+};
+/** Lines the writer shouldn't reuse: other posts' lines, newest first, then this post's current ones (when rewriting). */
+const usedLines = (p) => [...new Set([...otherDrawnPosts(p).flatMap(bodyLines), ...bodyLines(p)])];
+/** The other post that already has this line or a close rewording of it, if any. */
+function lineRepeat(text, p = post()) {
+  const key = hookKey(text);
+  if (!p || words(text).size < 3) return null;
+  return otherDrawnPosts(p).find((q) => bodyLines(q).some((l) => hookKey(l) === key || overlap(l, text) >= 0.8)) || null;
 }
 
 async function suggestHooks() {
@@ -1472,6 +2091,7 @@ function useHook(h) {
 
 async function makeSlides() {
   const p = post();
+  if (p && isSpot(p)) return ui.rendering ? undefined : makeSpotSlides(p);
   const apps = slideApps();
   const d = drawnOf(p);
   if (!p || ui.rendering || (isDrawn(p) ? !drawnSlides(p).some((s) => s.text.trim()) : !apps.length)) return;
@@ -1626,11 +2246,14 @@ function renderMine() {
   const off = !!post()?.skipMine;
   const drawnMode = isDrawn();
   $("#mine-app").classList.toggle("is-off", off);
+  const spotMode = isSpot();
   // In the drawings format the app is always the last slide, so there's no position to pick.
   $("#mine-pos").hidden = off || drawnMode;
   $(".mine-hint").textContent = drawnMode
     ? "Each post ends with a slide about it."
-    : "Goes into every post for this account, alongside the gems.";
+    : spotMode
+      ? "Goes into every spotlight for this account, alongside the apps you pick."
+      : "Goes into every post for this account, alongside the gems.";
   $("#mine-off").hidden = !off;
   $("#mine-skip").textContent = off ? "Add back to this post" : "Leave out of this post";
   $("#mine-find").disabled = m.searching;
@@ -1753,7 +2376,7 @@ function bindMine() {
 
 /* ---------- Caption + Send to phone ---------- */
 const hookTitle = () => {
-  if (isDrawn()) return postHook(post());
+  if (isDrawn() || isSpot()) return postHook(post());
   const o = opts();
   const t = [o.hookAccent, o.hookLine2, o.hookLine3].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
   return Number(o.part) > 0 ? `${t} (part ${o.part})` : t;
@@ -1846,22 +2469,61 @@ function renderPost() {
   $("#tag-count").classList.toggle("is-over", n > MAX_HASHTAGS);
 
   const write = $("#write-caption");
-  write.disabled = ui.post.writing || !(isDrawn(p) ? drawnSlides(p).some((s) => s.text.trim()) : slideApps().length);
+  write.disabled = ui.post.writing || !(isDrawn(p) ? drawnSlides(p).some((s) => s.text.trim()) : isSpot(p) ? !!spotApps(p) : slideApps().length);
   write.textContent = ui.post.writing ? `${WRITER_NAMES[state.writer]} is writing` : c.caption ? "Rewrite caption" : "Write caption";
   $("#copy-caption").disabled = !postText();
   renderPhone(p);
+}
+
+/** The account's own app, when this post shows it (so the caption has to say it's yours). */
+function featuredOwnApp(p) {
+  const own = ownAppOf(p);
+  if (!own) return null;
+  if (isDrawn(p)) return activePlug(p) ? own : null;
+  return lineupFor(p).some((a) => a.trackId === own.trackId) ? own : null;
+}
+
+/** "Paper Pond: Origami Letters" -> "Paper Pond". */
+function shortAppName(name) {
+  const short = name.split(/[:|–—]| - /)[0].trim();
+  return short || name.trim();
+}
+
+/** Puts "(fyi: i made App)" right after the caption's first sentence, so it shows before TikTok's "more". */
+function withDisclosure(caption, app) {
+  const name = shortAppName(app.trackName);
+  const note = `(fyi: i made ${name})`;
+  const text = caption.trim();
+  if (!text) return note;
+  if (text.toLowerCase().includes(`i made ${name.toLowerCase()}`)) return text;
+  const line = text.indexOf("\n");
+  const firstLine = line < 0 ? text.length : line;
+  const stop = text.slice(0, firstLine).search(/[.!?…](?=\s|$)/);
+  let at = stop < 0 ? firstLine : stop + 1;
+  // Keep emoji that close the sentence with it.
+  const tail = text.slice(at, firstLine).match(/^(\s*\p{Extended_Pictographic}[\p{Extended_Pictographic}\p{Cf}\p{M}\s]*)/u);
+  if (tail) at += tail[1].trimEnd().length;
+  return `${text.slice(0, at)} ${note}${text.slice(at)}`;
 }
 
 async function writeCaption() {
   const p = post();
   const apps = slideApps();
   const texts = drawnSlides(p).map((s) => s.text).filter((t) => t.trim());
-  if (!p || ui.post.writing || !(isDrawn(p) ? texts.length : apps.length)) return;
+  const spot = isSpot(p) ? spotOf(p) : null;
+  const spotted = spot ? spotApps(p) : null;
+  if (!p || ui.post.writing || !(isDrawn(p) ? texts.length : spot ? spotted : apps.length)) return;
   ui.post.writing = true;
   renderPost();
   try {
     const c = isDrawn(p)
       ? await invoke("generate_drawn_caption", { topic: drawnOf(p).topic || "", slides: texts, writer: state.writer })
+      : spot
+      ? await invoke("generate_spotlight_caption", {
+          prepared: spotted,
+          slides: [spot.hook, ...spot.lines.map((l) => l.text), spot.cta],
+          writer: state.writer,
+        })
       : await invoke("generate_caption", {
           // The hook and the picked apps set the theme. The search box may still hold another post's niche, so it's only a hint.
           hook: hookTitle(),
@@ -1870,7 +2532,8 @@ async function writeCaption() {
           ownAppId: ownAppOf(p)?.trackId ?? null,
           writer: state.writer,
         });
-    p.caption.caption = c.caption;
+    const own = featuredOwnApp(p);
+    p.caption.caption = own ? withDisclosure(c.caption, own) : c.caption;
     p.caption.hashtags = c.hashtags;
     save();
   } catch (e) {
@@ -2751,6 +3414,17 @@ async function init() {
         style: { ...DEFAULT_DRAWN_STYLE, ...(d.style || {}) },
       };
     }
+    if (p.format === "spotlight") {
+      const s = p.spotlight || {};
+      p.spotlight = {
+        ...newSpotlight(s),
+        hook: s.hook || "",
+        accent: s.accent || "",
+        cta: s.cta || "",
+        lines: (s.lines || []).map(newSpotLine),
+        desk: s.desk || null,
+      };
+    }
   }
   for (const a of state.accounts) {
     delete a.channelId;
@@ -2767,6 +3441,7 @@ async function init() {
   bindBoard();
   bindSlides();
   bindWrite();
+  bindSpot();
   bindMine();
   bindPost();
   bindSettings();

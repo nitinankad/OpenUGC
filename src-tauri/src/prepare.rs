@@ -135,6 +135,10 @@ fn run_claude_with_file(instructions: &str, prompt: &str) -> Result<String> {
     Ok(parsed.result)
 }
 
+/// The Codex model for writing and drawing. Pictures come from Codex's image tool either
+/// way, so a cheap model is enough; leaving it unset falls back to the user's (pricey) default.
+pub(crate) const CODEX_MODEL: &str = "gpt-6-luna";
+
 /// Runs Codex non-interactively. It has no separate system prompt, so the instructions lead the message.
 pub(crate) fn run_codex(instructions: &str, prompt: &str) -> Result<String> {
     let prompt = format!("{instructions}\n\n---\n\n{prompt}");
@@ -147,6 +151,7 @@ pub(crate) fn run_codex(instructions: &str, prompt: &str) -> Result<String> {
         "--sandbox", "read-only",
         "--ephemeral",
         "--color", "never",
+        "-m", CODEX_MODEL,
         "-c", "model_reasoning_effort=low",
         "-",
     ];

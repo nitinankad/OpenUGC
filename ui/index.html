@@ -20,8 +20,8 @@
         <span class="rail-account" id="rail-account"></span>
         <input class="rail-name" id="post-name" type="text" spellcheck="false" aria-label="Post name" />
       </div>
-      <button class="nav-item nav-step" data-view="find" data-format="gems">Find apps</button>
-      <button class="nav-item nav-step" data-view="prepare" data-format="gems">Prepared <span class="nav-count" id="nav-prepared"></span></button>
+      <button class="nav-item nav-step" data-view="find" data-format="gems spotlight">Find apps</button>
+      <button class="nav-item nav-step" data-view="prepare" data-format="gems spotlight">Prepared <span class="nav-count" id="nav-prepared"></span></button>
       <button class="nav-item nav-step" data-view="write" data-format="drawn" hidden>Write</button>
       <button class="nav-item nav-step" data-view="slides">Slides</button>
       <button class="nav-item nav-bottom" data-view="analytics">Analytics</button>
@@ -55,7 +55,7 @@
       <!-- Find -->
       <section class="view" id="view-find" hidden>
         <header class="find-head">
-          <h1>Find hidden gems</h1>
+          <h1 id="find-title">Find hidden gems</h1>
           <section class="hook-start" aria-labelledby="hook-start-title">
             <div class="hook-start-head">
               <h2 id="hook-start-title">Start with a hook</h2>
@@ -213,6 +213,53 @@
             </fieldset>
             <p class="hint">Change the words and drawings in <button type="button" class="link" data-goto="write">Write</button>.</p>
           </form>
+          <form class="settings" id="spot-settings" autocomplete="off" hidden>
+            <fieldset>
+              <legend>Words</legend>
+              <div class="inline spot-write">
+                <button type="button" class="btn btn-ask btn-sm" id="spot-write">Write</button>
+              </div>
+              <p class="field-note" id="spot-write-note"></p>
+              <label class="field">Hook, typed in a Mac window <textarea class="overview" rows="2" data-spot="hook" spellcheck="true"></textarea></label>
+              <label class="field">Highlighted words in the hook <input type="text" data-spot="accent" /></label>
+              <p class="repeat-note" id="spot-repeat" hidden></p>
+              <p class="field-note">One slide per app in this post, in the order from Find apps. Each shows the app's App Store page; upload your own screenshot for a slide to put it first.</p>
+              <ol class="spot-lines" id="spot-lines"></ol>
+              <input type="file" id="spot-file" accept="image/png,image/jpeg" hidden />
+              <label class="field">Last slide, under the apps' icons <textarea class="overview" rows="2" data-spot="cta" spellcheck="true"></textarea></label>
+              <label class="field">Window title <input type="text" data-spot="windowTitle" /></label>
+            </fieldset>
+            <fieldset>
+              <legend>Desk photo</legend>
+              <div class="desk-drop" id="desk-drop">
+                <ul class="desk-list" id="desk-list"></ul>
+                <p class="field-note" id="desk-empty">Drag desk photos here: a phone on a stand, facing the camera. Free stock sites like Pexels and Unsplash have plenty.</p>
+              </div>
+              <div class="desk-mark" id="desk-mark" hidden>
+                <p class="field-note" id="desk-mark-note"></p>
+                <div class="desk-mark-stage" id="desk-mark-stage">
+                  <img id="desk-mark-img" alt="Desk photo" />
+                  <svg id="desk-mark-svg" aria-hidden="true"></svg>
+                </div>
+                <div class="inline">
+                  <button type="button" class="btn btn-primary btn-sm" id="desk-mark-save" disabled>Save corners</button>
+                  <button type="button" class="btn btn-quiet" id="desk-mark-reset">Start over</button>
+                  <button type="button" class="btn btn-quiet" id="desk-mark-auto" hidden>Use the green screen instead</button>
+                  <button type="button" class="btn btn-quiet" id="desk-mark-cancel">Cancel</button>
+                </div>
+              </div>
+              <div class="inline">
+                <button type="button" class="btn btn-quiet" id="desk-mark-open" disabled>Mark the screen</button>
+                <button type="button" class="btn btn-quiet" id="desk-folder">Open desks folder</button>
+                <button type="button" class="btn btn-quiet" id="desk-make">Make one with Codex</button>
+              </div>
+              <p class="hint">If the phone's screen is solid bright green, it's found automatically. For any other photo, mark the screen's four corners once. Making one with Codex uses one image generation.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Colour</legend>
+              <div class="color-row"><input type="color" data-scolor aria-label="Highlight colour" /><input type="text" data-shex maxlength="7" /><span>Highlighted words, cursor and Get button</span></div>
+            </fieldset>
+          </form>
           <div class="slides-output">
             <div class="slides-actions">
               <button class="btn btn-primary" id="make-slides">Make slides</button>
@@ -336,6 +383,13 @@
       <figure class="dprev" id="dprev" hidden>
         <p class="dprev-text" id="dprev-text"></p>
         <img class="dprev-art" id="dprev-art" alt="" hidden />
+      </figure>
+      <figure class="sprev" id="sprev" hidden>
+        <img class="sprev-desk" id="sprev-desk" alt="" hidden />
+        <div class="sprev-win">
+          <div class="sprev-bar"><i></i><i></i><i></i><span id="sprev-title"></span></div>
+          <p class="sprev-text" id="sprev-text"></p>
+        </div>
       </figure>
       <div class="phone">
         <div class="island"></div>
